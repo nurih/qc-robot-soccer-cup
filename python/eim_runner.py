@@ -67,6 +67,7 @@ class EimRunner:
         self.input_width = 96
         self.input_height = 96
         self.labels: list[str] = []
+        self.thresholds: list = []
 
         self._start()
 
@@ -102,6 +103,28 @@ class EimRunner:
         self.input_width = int(params.get("image_input_width") or self.input_width)
         self.input_height = int(params.get("image_input_height") or self.input_height)
         self.labels = list(params.get("labels") or [])
+        self.thresholds = list(params.get("thresholds") or [])
+
+    def set_threshold(self, min_score: float, block_id: int | None = None) -> bool:
+        """Lower the model's own confidence floor.
+
+        The .eim ships with a built-in minimum (0.5 for this impulse) and simply
+        does not report anything below it, so no amount of client-side tuning can
+        recover a faint detection. FOMO scores small or distant objects low, so
+        the default floor can hide a ball entirely.
+        """
+        blocks = [block_id] if block_id is not None else [
+            t.get("id") for t in self.thresholds if t.get("type") == "object_detection"
+        ]
+        ok = False
+        for bid in blocks:
+            if bid is None:
+                continue
+            response = self._request(
+                {"id": self._take_id(), "set_threshold": {"id": bid, "min_score": float(min_score)}}
+            )
+            ok = ok or bool(response.get("success"))
+        return ok
 
     def close(self) -> None:
         if self._sock is not None:

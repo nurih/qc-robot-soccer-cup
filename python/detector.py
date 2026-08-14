@@ -33,6 +33,13 @@ def make_detector(backend: str | None = None, confidence: float | None = None):
 
         model_path = os.environ.get("EIM_MODEL_PATH")
         runner = EimRunner(model_path) if model_path else EimRunner()
+
+        # The model's built-in floor hides faint detections entirely; FOMO scores
+        # small/distant objects low, so allow lowering it.
+        floor = os.environ.get("EIM_MIN_SCORE")
+        if floor:
+            applied = runner.set_threshold(float(floor))
+            print(f"[INFO] model threshold -> {floor} ({'ok' if applied else 'not supported'})")
         print(
             f"[INFO] detector backend: eim ({runner.model_path}) "
             f"input={runner.input_width}x{runner.input_height} labels={runner.labels}"

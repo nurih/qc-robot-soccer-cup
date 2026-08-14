@@ -175,7 +175,9 @@ async function tickState() {
     document.querySelectorAll('.node').forEach(n =>
       n.classList.toggle('active', n.dataset.state === act));
 
-    pill($('camPill'), s.ticks > 0, 'live', 'waiting', false);
+    const camLive = s.ticks > 0 && !s.camera_idle_feed;
+    pill($('camPill'), camLive || s.camera_idle_feed,
+         camLive ? 'live' : 'idle feed', 'no stream', true);
     $('ballRate').textContent = s.ball_rate + '%';
     $('ballBar').style.width = Math.min(100, s.ball_rate) + '%';
     $('frames').textContent = s.ticks + '  (' + s.tick_rate + '/s)';

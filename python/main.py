@@ -24,7 +24,11 @@ DASHBOARD = os.environ.get("ROBOCUP_DASHBOARD", "1") not in {"0", "false", "Fals
 
 # Read-only telemetry sink; attaching it cannot change robot behaviour.
 dashboard = (
-    Dashboard(backend=os.environ.get("DETECTOR_BACKEND", "brick"), on_stop=robot.stop)
+    Dashboard(
+        backend=os.environ.get("DETECTOR_BACKEND", "brick"),
+        on_stop=robot.stop,
+        camera_url=CAMERA_URL,
+    )
     if DASHBOARD
     else None
 )

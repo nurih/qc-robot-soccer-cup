@@ -26,6 +26,11 @@ ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 PREVIEW_INTERVAL_SECONDS = 0.2
 PREVIEW_JPEG_QUALITY = 80
 
+# Treat the strategy as idle once no tick has arrived for this long, and only
+# then let the dashboard read the camera itself.
+IDLE_AFTER_SECONDS = 1.5
+IDLE_POLL_SECONDS = 0.5
+
 # How many recent state transitions to keep for the dashboard.
 TRANSITION_HISTORY = 12
 
@@ -65,7 +70,13 @@ def annotate(frame, detections: list):
 class Dashboard:
     """Collects strategy telemetry and serves it over HTTP."""
 
-    def __init__(self, port: int = 7000, backend: str = "", on_stop=None) -> None:
+    def __init__(
+        self,
+        port: int = 7000,
+        backend: str = "",
+        on_stop=None,
+        camera_url: str = "",
+    ) -> None:
         self._lock = threading.Lock()
         self._preview = b""
         self._last_preview_at = 0.0
@@ -81,6 +92,7 @@ class Dashboard:
             "tick_rate": 0.0,
             "backend": backend,
             "health": {},
+            "camera_idle_feed": False,
             "error": "",
         }
         self._last_tick_at = 0.0
@@ -96,6 +108,14 @@ class Dashboard:
         self._ui.expose_api("GET", "/state", self.api_state)
         self._ui.expose_api("GET", "/preview", self.api_preview)
         self._ui.expose_api("POST", "/stop", self.api_stop)
+
+        # The strategy only ticks while the program is enabled, so without this
+        # the feed would be blank until someone presses BOOT. This thread reads
+        # the stream itself, but only while the strategy is idle, so the two
+        # never hold the camera at the same time.
+        self._camera_url = camera_url
+        if camera_url:
+            threading.Thread(target=self._idle_preview_loop, daemon=True).start()
 
     @property
     def url(self) -> str:
@@ -134,6 +154,7 @@ class Dashboard:
                     self._transitions.append(transition)
                     del self._transitions[:-TRANSITION_HISTORY]
 
+                self._state["camera_idle_feed"] = False
                 self._state["state"] = state or self._state["state"]
                 self._state["team"] = team or self._state["team"]
                 self._state["detections"] = detections
@@ -164,6 +185,49 @@ class Dashboard:
             with self._lock:
                 self._state["error"] = f"dashboard: {str(err)[:180]}"
 
+    # -- idle preview -----------------------------------------------------
+
+    def _strategy_is_live(self) -> bool:
+        with self._lock:
+            last = self._last_tick_at
+        return bool(last) and (time.monotonic() - last) < IDLE_AFTER_SECONDS
+
+    def _idle_preview_loop(self) -> None:
+        """Show the camera while the robot is idle, so the feed is never blank."""
+        import requests  # local import: only needed when an idle feed is wanted
+
+        while True:
+            if self._strategy_is_live():
+                time.sleep(IDLE_POLL_SECONDS)
+                continue
+
+            response = None
+            try:
+                response = requests.get(self._camera_url, stream=True, timeout=(5, 10))
+                response.raise_for_status()
+                buffer = b""
+                for chunk in response.iter_content(4096):
+                    if self._strategy_is_live():
+                        break
+                    buffer += chunk
+                    start = buffer.find(b"\xff\xd8")
+                    end = buffer.find(b"\xff\xd9", start + 2)
+                    if start == -1 or end == -1:
+                        continue
+                    jpeg, buffer = buffer[start:end + 2], buffer[end + 2:]
+                    with self._lock:
+                        self._preview = jpeg
+                        self._last_preview_at = time.monotonic()
+                        self._state["camera_idle_feed"] = True
+                    time.sleep(PREVIEW_INTERVAL_SECONDS)
+            except Exception as err:
+                with self._lock:
+                    self._state["error"] = f"camera: {str(err)[:160]}"
+                time.sleep(2.0)
+            finally:
+                if response is not None:
+                    response.close()
+
     def note_error(self, message: str) -> None:
         with self._lock:
             self._state["error"] = message[:200]
@@ -192,6 +256,7 @@ class Dashboard:
                 "tick_rate": self._state["tick_rate"],
                 "backend": self._state["backend"],
                 "health": dict(self._state["health"]),
+                "camera_idle_feed": self._state["camera_idle_feed"],
                 "transitions": list(reversed(self._transitions)),
                 "error": self._state["error"],
             }

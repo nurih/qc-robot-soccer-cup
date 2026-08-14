@@ -21,6 +21,7 @@ from typing import Optional
 from ball_follower import BallFollower, _best_ball, _centre_offset
 from robot_client import MiniAutoRobot
 from vision.camera_stream import CameraStream
+from perception import PerceptionWorker
 from sensor_monitor import SensorMonitor
 from vision.wall_detector import WallDetector
 
@@ -71,6 +72,7 @@ class SoccerStrategy:
         wall_detector: WallDetector,
         config: Optional[Config] = None,
         observer=None,
+        perception=None,
     ) -> None:
         self._robot = robot
         self._camera = camera
@@ -80,6 +82,15 @@ class SoccerStrategy:
         self._follower = BallFollower()
         self._state = State.SEARCH
         self._sensors = SensorMonitor()
+        # Vision runs on its own thread so the control loop never waits for the
+        # model; see perception.py.
+        # Injectable so tests and demos can supply a synchronous stand-in and
+        # get deterministic behaviour instead of racing a background thread.
+        self._owns_perception = perception is None
+        if perception is None:
+            perception = PerceptionWorker(camera, detector, wall_detector)
+            perception.start()
+        self._perception = perception
         self._misses = 0
         self._last_transition = ""
         # Optional read-only telemetry sink (see dashboard.Dashboard.publish).
@@ -95,6 +106,8 @@ class SoccerStrategy:
         self._state = new_state
 
     def close(self) -> None:
+        if self._owns_perception:
+            self._perception.close()
         self._camera.close()
         if hasattr(self._detector, "close"):
             self._detector.close()
@@ -106,19 +119,18 @@ class SoccerStrategy:
         return "RED" if self._team_color() == "BLUE" else "BLUE"
 
     def tick(self) -> None:
-        frame, age_s = self._camera.read()
-        if frame is None or age_s > self._config.stale_frame_s:
+        snapshot = self._perception.latest()
+        age_s = snapshot.age() if snapshot is not None else float("inf")
+        if snapshot is None or age_s > self._config.stale_frame_s:
             # Issue no motion, but do NOT call robot.stop(): the firmware's stop
             # also clears program_enabled, which would end the run on a single
             # slow frame. Timed drives auto-stop, so skipping the tick is enough.
-            print(f"[STRATEGY] stale/missing camera frame ({age_s:.2f}s old) -> hold")
+            print(f"[STRATEGY] stale/missing perception ({age_s:.2f}s old) -> hold")
             return
 
+        frame = snapshot.frame
+        detection = snapshot.detection
         frame_h, frame_w = frame.shape[:2]
-
-        # Encode OpenCV frame to JPEG for the detector backend
-        _, jpeg_buf = cv2.imencode(".jpg", frame)
-        detection = self._detector.detect(jpeg_buf.tobytes(), image_type="jpg")
 
         ball = _best_ball(detection)
         if ball is None or str(ball.get("class_name", "")).strip().lower() not in {
@@ -133,7 +145,7 @@ class SoccerStrategy:
         else:
             self._misses = 0
 
-        wall = self._wall.detect(frame)
+        wall = snapshot.wall
         team = self._team_color()
         opponent = self._opponent_color()
 

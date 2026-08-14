@@ -11,6 +11,7 @@ and it doubles as a regression test of the transition rules.
 Runs anywhere: it stubs out arduino.app_utils so it works off the board too.
 """
 import sys
+import time
 import types
 
 from pathlib import Path
@@ -41,6 +42,7 @@ if "arduino.app_utils" not in sys.modules:
 
 import numpy as np  # noqa: E402
 
+from perception import Snapshot  # noqa: E402
 from simple_strategy import SimpleStrategy, State  # noqa: E402
 from vision.wall_detector import WallReading  # noqa: E402
 
@@ -63,6 +65,9 @@ class FakeRobot:
     def drive(self, command, speed, ms) -> None:
         self.last_command = f"{command} {speed}/{ms}ms"
 
+    # The strategies issue motion without blocking; see robot_client.drive_async.
+    drive_async = drive
+
     def stop(self) -> None:
         self.last_command = "stop"
 
@@ -83,6 +88,33 @@ class FakeDetector:
 
     def detect(self, *_args, **_kwargs) -> dict:
         return self.detection
+
+
+class SyncPerception:
+    """Perception computed inline, so each tick sees exactly this step's inputs.
+
+    The real PerceptionWorker runs on a thread, which is right for the robot but
+    would make this walkthrough race the scheduler.
+    """
+
+    def __init__(self, camera, detector, wall_detector) -> None:
+        self._camera = camera
+        self._detector = detector
+        self._wall = wall_detector
+
+    def latest(self):
+        frame, _age = self._camera.read()
+        if frame is None:
+            return None
+        return Snapshot(
+            frame=frame,
+            detection=self._detector.detect(b"", image_type="jpg"),
+            wall=self._wall.detect(frame),
+            captured_at=time.monotonic(),
+        )
+
+    def close(self) -> None:
+        pass
 
 
 class FakeWall:
@@ -126,7 +158,11 @@ def main() -> None:
     robot = FakeRobot(team_is_blue=False)  # our team is RED
     detector = FakeDetector()
     wall = FakeWall()
-    strategy = SimpleStrategy(robot, FakeCamera(), detector, wall)
+    camera = FakeCamera()
+    strategy = SimpleStrategy(
+        robot, camera, detector, wall,
+        perception=SyncPerception(camera, detector, wall),
+    )
 
     print(f"team = {'BLUE' if robot.team_is_blue else 'RED'}   "
           f"(pushing toward the {'RED' if robot.team_is_blue else 'BLUE'} wall)\n")

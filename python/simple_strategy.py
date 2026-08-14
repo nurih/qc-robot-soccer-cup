@@ -27,6 +27,7 @@ from typing import Optional
 from ball_follower import _best_ball, _centre_offset
 from robot_client import MiniAutoRobot
 from vision.camera_stream import CameraStream
+from perception import PerceptionWorker
 from sensor_monitor import SensorMonitor
 from vision.wall_detector import WallDetector
 
@@ -80,6 +81,7 @@ class SimpleStrategy:
         wall_detector: WallDetector,
         config: Optional[Config] = None,
         observer=None,
+        perception=None,
     ) -> None:
         self._robot = robot
         self._camera = camera
@@ -89,9 +91,20 @@ class SimpleStrategy:
         self._observer = observer
         self._state = State.SEARCH
         self._sensors = SensorMonitor()
+        # Vision runs on its own thread (perception.py) so deciding never waits
+        # for the model.
+        # Injectable so tests and demos can supply a synchronous stand-in and
+        # get deterministic behaviour instead of racing a background thread.
+        self._owns_perception = perception is None
+        if perception is None:
+            perception = PerceptionWorker(camera, detector, wall_detector)
+            perception.start()
+        self._perception = perception
         self._last_transition = ""
 
     def close(self) -> None:
+        if self._owns_perception:
+            self._perception.close()
         self._camera.close()
         if hasattr(self._detector, "close"):
             self._detector.close()
@@ -114,20 +127,21 @@ class SimpleStrategy:
     # -- one tick ---------------------------------------------------------
 
     def tick(self) -> None:
-        frame, age_s = self._camera.read()
-        if frame is None or age_s > self._config.stale_frame_s:
-            # Never drive on a frame we cannot trust -- but do not call
-            # robot.stop() here: it also clears program_enabled and would end the
-            # run. Timed drives auto-stop, so simply issuing nothing is enough.
-            print(f"[SIMPLE] stale/missing frame ({age_s:.2f}s) -> hold")
+        snapshot = self._perception.latest()
+        age_s = snapshot.age() if snapshot is not None else float("inf")
+        if snapshot is None or age_s > self._config.stale_frame_s:
+            # Never act on a view we cannot trust -- but do not call robot.stop()
+            # here: it also clears program_enabled and would end the run. Timed
+            # drives auto-stop, so simply issuing nothing is enough.
+            print(f"[SIMPLE] stale/missing perception ({age_s:.2f}s) -> hold")
             return
 
+        frame = snapshot.frame
+        detection = snapshot.detection
+        wall = snapshot.wall
         frame_h, frame_w = frame.shape[:2]
 
-        _, jpeg = cv2.imencode(".jpg", frame)
-        detection = self._detector.detect(jpeg.tobytes(), image_type="jpg")
         ball = _best_ball(detection)
-        wall = self._wall.detect(frame)
         sensors = self._sensors.update(self._robot.read_sensors())
 
         if self._observer is not None:

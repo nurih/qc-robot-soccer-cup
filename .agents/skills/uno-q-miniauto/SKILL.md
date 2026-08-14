@@ -1,6 +1,6 @@
 ---
 name: uno-q-miniauto
-description: Create and adapt Hiwonder miniAuto robots on Arduino UNO Q using this repository's firmware, Python Bridge client/application, App Lab configuration, and ESP32-S3 camera firmware. Use when building a custom miniAuto variant, autonomous routine, soccer behavior, sensor or actuator feature, Bridge RPC, motor/chassis tuning, camera configuration, or when validating related UNO Q changes. Do not use for unrelated robots or generic Arduino projects.
+description: Create and adapt Hiwonder miniAuto robots on Arduino UNO Q using this repository's firmware, Python Bridge application, App Lab configuration, ESP32-S3 camera, and Edge Impulse workflow. Use when building a custom miniAuto variant, autonomous routine, soccer behavior, sensor or actuator feature, Bridge RPC, motor/chassis tuning, camera configuration, image-capture dataset, Edge Impulse object-detection model, deployment, inference integration, or when validating related UNO Q changes. Do not use for unrelated robots or generic Arduino projects.
 ---
 
 # Create an UNO Q miniAuto
@@ -11,9 +11,10 @@ Extend the working robot in this repository instead of generating a second drive
 
 1. Find the repository root with `git rev-parse --show-toplevel` and work from it.
 2. Read [references/architecture.md](references/architecture.md) completely before editing. Treat the checked-out source as authoritative if it differs from the reference.
-3. Inspect `git status --short`. Preserve user changes and avoid unrelated rewrites.
-4. Translate the request into observable behavior, inputs, outputs, timing, and a safe stop condition. Ask only for a choice that would materially change the design and cannot be inferred from the repository.
-5. Run the baseline contract check:
+3. For Edge Impulse, dataset capture, model export, `.eim`, or inference work, also read [references/edge-impulse.md](references/edge-impulse.md) completely before editing.
+4. Inspect `git status --short`. Preserve user changes and avoid unrelated rewrites.
+5. Translate the request into observable behavior, inputs, outputs, timing, and a safe stop condition. Ask only for a choice that would materially change the design and cannot be inferred from the repository.
+6. Run the baseline contract check:
 
    ```bash
    python3 .agents/skills/uno-q-miniauto/scripts/check_robot_contract.py
@@ -24,6 +25,7 @@ Extend the working robot in this repository instead of generating a second drive
 | Requested change | Primary files | Also change |
 | --- | --- | --- |
 | Autonomous sequence, soccer strategy, model integration, or sensor-driven policy | `python/main.py` or a focused new module under `python/` | `python/robot_client.py` only if the existing API is insufficient |
+| Edge Impulse data capture, labeling, training, export, or inference | `python/capture.py`, a focused inference module under `python/`, and the README model workflow | Firmware Bridge providers for physical capture controls; App Lab/runtime configuration and model-path documentation |
 | New actuator, sensor, safety rule, motor behavior, or MCU capability | `sketch/sketch.ino` | `python/robot_client.py` and the Python application when exposed through Bridge |
 | Bridge API addition or signature change | `sketch/sketch.ino` and `python/robot_client.py` | Call sites, payload docs, and validation |
 | Camera AP, stream, button, or GC2145 behavior | `camera/HiwonderCamStream/HiwonderCamStream.ino` | Consumer configuration or docs that depend on its URL/protocol |
@@ -41,7 +43,7 @@ Prefer a Python-only implementation for high-level behavior. Change firmware onl
 - For a new Bridge operation, update all four contract points in one change: the MCU implementation, `Bridge.provide_safe(...)` registration, the typed `MiniAutoRobot` wrapper, and its call site or documented payload.
 - Make routines interruptible through the existing program-enabled flow. Use `run_program(...)`, guarded robot operations, and `finally: robot.stop()` for application entry points that can move hardware.
 - Keep the current health and sensor fields backward compatible. Add fields instead of silently renaming or changing their units.
-- Do not embed model binaries or generated inference artifacts in this driver repository; `.gitignore` intentionally excludes common model formats.
+- Keep generated models untracked. A local path such as `models/<name>-linux-aarch64.eim` is acceptable for App Lab runtime use, but `.gitignore` intentionally excludes `.eim` and other model formats.
 - Never run commands that move motors, actuate the servo, flash boards, or alter a live robot unless the user has explicitly requested hardware execution and confirmed a safe physical setup.
 
 ## Validate in stages

@@ -55,6 +55,24 @@ def quoted_names(pattern: str, source: str) -> set[str]:
     return set(re.findall(pattern, source))
 
 
+def top_level_string_dict_keys(tree: ast.Module, variable_name: str) -> set[str]:
+    for statement in tree.body:
+        if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+        if not any(isinstance(target, ast.Name) and target.id == variable_name for target in targets):
+            continue
+        value = statement.value
+        if not isinstance(value, ast.Dict):
+            return set()
+        return {
+            key.value
+            for key in value.keys
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+    return set()
+
+
 def main() -> int:
     args = parse_args()
     root = args.repo_root.resolve()
@@ -67,8 +85,16 @@ def main() -> int:
     sketch_yaml = read_required(root, "sketch/sketch.yaml", errors)
     read_required(root, "app.yaml", errors)
 
+    python_sources: dict[str, str] = {}
+    python_dir = root / "python"
+    if python_dir.is_dir():
+        for path in sorted(python_dir.glob("*.py")):
+            python_sources[str(path.relative_to(root))] = path.read_text(encoding="utf-8")
+
     providers = quoted_names(r'Bridge\.provide_safe\(\s*"([A-Za-z_][A-Za-z0-9_]*)"', sketch)
-    calls = quoted_names(r'Bridge\.call\(\s*"([A-Za-z_][A-Za-z0-9_]*)"', client)
+    calls = set().union(
+        *(quoted_names(r'Bridge\.call\(\s*"([A-Za-z_][A-Za-z0-9_]*)"', source) for source in python_sources.values())
+    )
 
     missing_baseline = BASE_RPCS - providers
     if missing_baseline:
@@ -87,13 +113,41 @@ def main() -> int:
         message = "firmware provider(s) without MiniAutoRobot wrapper: " + ", ".join(sorted(providers_without_client))
         (errors if args.strict else warnings).append(message)
 
-    for relative, source in (("python/robot_client.py", client), ("python/main.py", main_py)):
-        if not source:
-            continue
+    for relative, source in python_sources.items():
         try:
-            ast.parse(source, filename=relative)
+            tree = ast.parse(source, filename=relative)
         except SyntaxError as exc:
             errors.append(f"{relative} syntax error at line {exc.lineno}: {exc.msg}")
+            continue
+
+        dynamic_call_lines = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            owner = node.func.value
+            if (
+                node.func.attr == "call"
+                and isinstance(owner, ast.Name)
+                and owner.id == "Bridge"
+                and node.args
+                and not (isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str))
+            ):
+                dynamic_call_lines.append(node.lineno)
+        if dynamic_call_lines:
+            warnings.append(
+                f"{relative} has dynamic Bridge.call at line(s) "
+                + ", ".join(str(line) for line in dynamic_call_lines)
+                + "; verify provider names manually"
+            )
+
+        if relative == "python/capture.py":
+            capture_methods = top_level_string_dict_keys(tree, "LABELS")
+            missing_capture_providers = capture_methods - providers
+            if missing_capture_providers:
+                warnings.append(
+                    "python/capture.py expects capture provider(s) not registered by firmware: "
+                    + ", ".join(sorted(missing_capture_providers))
+                )
 
     if "platform: arduino:zephyr" not in sketch_yaml:
         errors.append("sketch/sketch.yaml does not declare platform arduino:zephyr")

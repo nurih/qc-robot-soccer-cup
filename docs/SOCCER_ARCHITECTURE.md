@@ -68,6 +68,26 @@ flowchart TD
 **Default / resting state is SEARCH.**
 The robot scans by rotating until it sees the ball.
 
+```mermaid
+stateDiagram-v2
+    [*] --> SEARCH
+
+    SEARCH --> APPROACH: ball detected
+    APPROACH --> PUSH: ball close or follower arrived
+    APPROACH --> SEARCH: ball missing for grace ticks
+    APPROACH --> APPROACH: ball missing during grace
+    RETREAT --> SEARCH: backward pulse complete
+
+    PUSH --> APPROACH: ball lost or needs realignment
+    PUSH --> RETREAT: own wall ahead or close obstacle
+    PUSH --> PUSH: opponent or unknown wall ahead
+
+    note left of SEARCH
+        Any state: stale or missing frame
+        stops the motor without changing state.
+    end note
+```
+
 | State | Entry | Behavior | Exits to |
 |---|---|---|---|
 | `SEARCH` | startup; ball lost for ≥ `LOST_BALL_GRACE_TICKS` | Rotate left at `SEARCH_SPEED` | `APPROACH` when ball detected |

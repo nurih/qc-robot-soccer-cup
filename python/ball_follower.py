@@ -14,6 +14,8 @@ a stop rather than to continued motion.
 # The trained impulse labels the ball; accept the usual spellings so a relabelled
 # dataset does not silently stop matching.
 BALL_LABELS = {"soccer_ball", "soccerball", "ball"}
+GOAL_LABELS = {"goal"}
+ROBOT_LABELS = {"robot"}
 
 MIN_CONFIDENCE = 0.5
 
@@ -27,7 +29,7 @@ TURN_DEADZONE = 0.24
 # Durations act as a dead-man timeout for drive_async: long enough to outlast one
 # perception loop so motion is continuous, short enough that a stalled loop stops
 # the robot promptly. Steering precision comes from the loop rate, not the pulse.
-TURN_SPEED = 200
+TURN_SPEED = 150
 TURN_MS = 300
 FORWARD_SPEED = 235
 FORWARD_MS = 300
@@ -37,15 +39,15 @@ FORWARD_MS = 300
 ARRIVED_DISTANCE_MM = 110
 
 
-def _best_ball(detection: dict | None) -> dict | None:
-    """Highest-confidence ball detection above MIN_CONFIDENCE, or None."""
+def _best_of(detection: dict | None, labels: set) -> dict | None:
+    """Highest-confidence detection whose label is in `labels`, or None."""
     if not detection or "detection" not in detection:
         return None
 
     candidates = []
     for item in detection["detection"] or []:
         label = str(item.get("class_name", "")).strip().lower()
-        if label not in BALL_LABELS:
+        if label not in labels:
             continue
         confidence = item.get("confidence")
         if confidence is None:
@@ -60,6 +62,19 @@ def _best_ball(detection: dict | None) -> dict | None:
     if not candidates:
         return None
     return max(candidates, key=lambda pair: pair[0])[1]
+
+
+def _best_ball(detection: dict | None) -> dict | None:
+    return _best_of(detection, BALL_LABELS)
+
+
+def _best_goal(detection: dict | None) -> dict | None:
+    return _best_of(detection, GOAL_LABELS)
+
+
+def _best_robot(detection: dict | None) -> dict | None:
+    """Highest-confidence *other* robot. Used for avoidance, never as a target."""
+    return _best_of(detection, ROBOT_LABELS)
 
 
 def _centre_offset(item: dict, frame_width: int) -> float | None:

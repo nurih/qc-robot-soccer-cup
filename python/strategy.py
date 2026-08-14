@@ -18,7 +18,9 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
-from ball_follower import BallFollower, _best_ball, _centre_offset
+from ball_follower import (
+    BallFollower, _best_ball, _best_goal, _best_robot, _centre_offset,
+)
 from robot_client import MiniAutoRobot
 from vision.camera_stream import CameraStream
 from perception import PerceptionWorker
@@ -31,11 +33,21 @@ CLOSE_HEIGHT_THRESHOLD = 0.35   # bbox height fraction considered "ball is close
 PUSH_OBSTACLE_CM = 8            # ultrasonic distance treated as "hit something"
 LOST_BALL_GRACE_TICKS = 3       # consecutive missed detections tolerated before re-searching
 
+# Opponent avoidance: cornering or tipping an opponent is a yellow card, so this
+# check outranks whatever the robot was doing.
+OPPONENT_AVOID_CM = 15
+AVOID_TURN_SPEED, AVOID_TURN_MS = 200, 200
+AVOID_FORWARD_SPEED, AVOID_FORWARD_MS = 220, 250
+
+# Committed strike, fired only once ball and goal line up.
+KICK_SPEED, KICK_MS = 255, 500
+GOAL_ALIGN_DEADBAND = 0.20
+
 # Aggressive tuning: 255 is the firmware clamp.
 # With drive_async the duration is no longer a motion quantum - it is a dead-man
 # timeout. It must outlast one loop iteration (~150 ms) so motion stays smooth
 # between commands, while still stopping the robot quickly if the loop dies.
-SEARCH_SPEED, SEARCH_MS = 215, 300
+SEARCH_SPEED, SEARCH_MS = 150, 300
 PUSH_SPEED, PUSH_MS = 255, 300
 RETREAT_SPEED, RETREAT_MS = 220, 300
 
@@ -145,17 +157,22 @@ class SoccerStrategy:
         else:
             self._misses = 0
 
+        goal = _best_goal(detection)
+        opponent_robot = _best_robot(detection)
+
         wall = snapshot.wall
         team = self._team_color()
         opponent = self._opponent_color()
 
+        sensors = self._sensors.update(self._robot.read_sensors())
+        distance_cm = sensors.get("ultrasonic_cm", -1)
+
         print(
             f"[STRATEGY] state={self._state.value} team={team} "
-            f"wall={wall.side}(r={wall.red_pct:.1f}% b={wall.blue_pct:.1f}%) "
-            f"ball={'seen' if ball else 'none'}"
+            f"ball={'Y' if ball else '-'} goal={'Y' if goal else '-'} "
+            f"opp={'Y' if opponent_robot else '-'} "
+            f"wall={wall.side} us={distance_cm}cm"
         )
-
-        sensors = self._sensors.update(self._robot.read_sensors())
 
         if self._observer is not None:
             self._observer(
@@ -170,14 +187,50 @@ class SoccerStrategy:
                 transition=self._last_transition,
             )
 
+        # Avoidance outranks every state, including PUSH: being shoved into a
+        # wall mid-push is exactly the yellow-card scenario. It is a per-tick
+        # override, not a state, so we resume wherever we were once clear.
+        if self._avoid_opponent(opponent_robot, frame_w, distance_cm):
+            return
+
         if self._state is State.SEARCH:
             self._do_search(ball)
         elif self._state is State.APPROACH:
             self._do_approach(detection, ball, frame_w, frame_h, sensors)
         elif self._state is State.PUSH:
-            self._do_push(ball, frame_w, wall, opponent, sensors)
+            self._do_push(ball, goal, frame_w, wall, opponent, sensors)
         else:
             self._do_retreat()
+
+    def _avoid_opponent(self, opponent_robot, frame_w: int, distance_cm) -> bool:
+        """Steer clear of another robot. Returns True if it took the tick.
+
+        Turn direction comes from which side of the frame the opponent is on -
+        the bounding box already tells us, so there is no need to guess.
+        """
+        if opponent_robot is None:
+            return False
+        try:
+            distance_cm = int(distance_cm)
+        except (TypeError, ValueError):
+            return False
+        if distance_cm <= 0 or distance_cm > OPPONENT_AVOID_CM:
+            return False
+
+        offset = _centre_offset(opponent_robot, frame_w)
+        if offset is None:
+            return False
+
+        if abs(offset) <= REALIGN_DEADBAND:
+            # Dead ahead: turn away from the side it occupies.
+            command = "rotate_right" if offset < 0 else "rotate_left"
+            print(f"[STRATEGY] opponent at {distance_cm}cm dead ahead -> {command}")
+            self._robot.drive_async(command, AVOID_TURN_SPEED, AVOID_TURN_MS)
+        else:
+            # Already off to one side: drive past it.
+            print(f"[STRATEGY] slipping past opponent at {distance_cm}cm")
+            self._robot.drive_async("forward", AVOID_FORWARD_SPEED, AVOID_FORWARD_MS)
+        return True
 
     def _do_search(self, ball: Optional[dict]) -> None:
         if ball is not None:
@@ -215,6 +268,7 @@ class SoccerStrategy:
     def _do_push(
         self,
         ball: Optional[dict],
+        goal: Optional[dict],
         frame_w: int,
         wall,
         opponent: str,
@@ -231,10 +285,24 @@ class SoccerStrategy:
 
         ultrasonic_cm = sensors.get("ultrasonic_cm", -1)
 
-        if wall.side == opponent:
+        # Preferred: aim by actually seeing the goal behind the ball.
+        goal_offset = _centre_offset(goal, frame_w) if goal is not None else None
+        if goal_offset is not None:
+            misalign = goal_offset - offset
+            if abs(misalign) <= GOAL_ALIGN_DEADBAND:
+                print(f"[STRATEGY] ball+goal aligned ({misalign:+.2f}) -> KICK")
+                self._robot.drive_async("forward", KICK_SPEED, KICK_MS)
+            else:
+                # Line the goal up behind the ball before committing.
+                command = "rotate_right" if misalign > 0 else "rotate_left"
+                print(f"[STRATEGY] goal off by {misalign:+.2f} -> {command}")
+                self._robot.drive_async(command, SEARCH_SPEED, 150)
+        elif wall.side == opponent:
+            # Fallback: no goal in frame, so trust wall colour as before. Goal
+            # detection is unreliable, so this path stays the safety net.
             self._robot.drive_async("forward", PUSH_SPEED, PUSH_MS)
         elif wall.side == "UNKNOWN":
-            # Ambiguous wall color -- nudge forward cautiously and re-check
+            # Ambiguous wall colour -- nudge forward cautiously and re-check
             # next tick instead of committing to a full push.
             self._robot.drive_async("forward", PUSH_SPEED, PUSH_MS // 2)
         else:
@@ -243,8 +311,7 @@ class SoccerStrategy:
             return
 
         if 0 < ultrasonic_cm <= PUSH_OBSTACLE_CM and wall.side != opponent:
-            print("[STRATEGY] unexpected close obstacle while pushing -> retreat")
-            self._state = State.RETREAT
+            self._go(State.RETREAT, "unexpected obstacle while pushing")
 
     def _do_retreat(self) -> None:
         self._robot.drive_async("backward", RETREAT_SPEED, RETREAT_MS)

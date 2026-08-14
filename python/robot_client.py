@@ -25,10 +25,31 @@ class MiniAutoRobot:
             raise ProgramStopped
 
     def drive(self, command: str, speed: int = 150, ms: int = 500) -> None:
+        """Drive and block until the timed move has finished.
+
+        Use this for scripted sequences, where one move must complete before the
+        next begins. For a perception loop use drive_async: blocking here stops
+        the robot observing for the whole pulse.
+        """
         self._require_running()
         Bridge.call("drive", command, int(speed), int(ms))
         time.sleep(ms / 1000.0 + 0.1)
         self._require_running()
+
+    def drive_async(self, command: str, speed: int = 150, ms: int = 500) -> None:
+        """Start a timed move and return immediately.
+
+        The firmware owns the timing: the move auto-stops after `ms`, so a caller
+        that dies or stalls cannot leave the motors running. Issuing a new move
+        before the previous one expires simply replaces it, which is what a
+        control loop wants - motion continues while perception keeps running,
+        instead of the two taking turns.
+
+        Interruption still works: a BOOT press stops the motors in firmware and
+        clears program state, and guarded callers re-check is_running() each pass.
+        """
+        self._require_running()
+        Bridge.call("drive", command, int(speed), int(ms))
 
     def stop(self) -> bool:
         return bool(Bridge.call("stop"))

@@ -15,7 +15,9 @@ CAMERA_URL = os.environ.get("CAMERA_STREAM_URL", "http://192.168.5.1:81/stream")
 BALL_LABEL = os.environ.get("ROBOCUP_BALL_LABEL", "soccerball")
 BALL_CONFIDENCE = float(os.environ.get("ROBOCUP_BALL_CONFIDENCE", "0.5"))
 WALL_MIN_COVERAGE_PCT = float(os.environ.get("ROBOCUP_WALL_MIN_COVERAGE_PCT", "2.0"))
-STALE_FRAME_S = int(os.environ.get("ROBOCUP_STALE_FRAME_MS", "500")) / 1000.0
+# The perception loop measures ~600 ms/tick on this hardware, so a 500 ms
+# limit marks almost every frame stale. Allow several ticks of slack.
+STALE_FRAME_S = int(os.environ.get("ROBOCUP_STALE_FRAME_MS", "2000")) / 1000.0
 MODE = os.environ.get("ROBOCUP_MODE", "match")  # "match" or "demo"
 # "full" = strategy.SoccerStrategy; "simple" = simple_strategy.SimpleStrategy,
 # a minimal readable version that logs every state transition and why.
@@ -119,7 +121,8 @@ def run_match() -> None:
             if not robot.is_running():
                 raise ProgramStopped
             strategy.tick()
-            time.sleep(0.05)
+            # No sleep: tick() already blocks on the timed drive, and the loop
+            # rate is the limiting factor for how fast the robot can react.
     finally:
         strategy.close()
         if dashboard is not None:

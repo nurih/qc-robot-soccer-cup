@@ -37,11 +37,13 @@ CENTRE_DEADBAND = 0.15
 # Ball bounding-box height as a fraction of the frame. Bigger box = closer ball.
 CLOSE_ENOUGH = 0.35
 
-# Aggressive tuning: 255 is the firmware clamp.
-TURN_SPEED, TURN_MS = 200, 150
-FORWARD_SPEED, FORWARD_MS = 235, 220
-PUSH_SPEED, PUSH_MS = 255, 350
-BACK_SPEED, BACK_MS = 220, 350
+# Aggressive tuning: 255 is the firmware clamp. With drive_async the duration is
+# a dead-man timeout, not a motion quantum: it must outlast one loop iteration so
+# motion is continuous, but stay short enough to stop quickly if the loop dies.
+TURN_SPEED, TURN_MS = 200, 300
+FORWARD_SPEED, FORWARD_MS = 235, 300
+PUSH_SPEED, PUSH_MS = 255, 300
+BACK_SPEED, BACK_MS = 220, 300
 
 
 class State(Enum):
@@ -114,9 +116,10 @@ class SimpleStrategy:
     def tick(self) -> None:
         frame, age_s = self._camera.read()
         if frame is None or age_s > self._config.stale_frame_s:
-            # Never drive on a frame we cannot trust.
-            print(f"[SIMPLE] stale/missing frame ({age_s:.2f}s) -> stop")
-            self._robot.stop()
+            # Never drive on a frame we cannot trust -- but do not call
+            # robot.stop() here: it also clears program_enabled and would end the
+            # run. Timed drives auto-stop, so simply issuing nothing is enough.
+            print(f"[SIMPLE] stale/missing frame ({age_s:.2f}s) -> hold")
             return
 
         frame_h, frame_w = frame.shape[:2]
@@ -142,7 +145,7 @@ class SimpleStrategy:
             if ball is not None:
                 self._go(State.APPROACH, "ball seen")
             else:
-                self._robot.drive("rotate_left", TURN_SPEED, TURN_MS)
+                self._robot.drive_async("rotate_left", TURN_SPEED, TURN_MS)
 
         elif self._state is State.APPROACH:
             offset = _centre_offset(ball, frame_w)
@@ -151,11 +154,11 @@ class SimpleStrategy:
             if _ball_height_fraction(ball, frame_h) >= CLOSE_ENOUGH:
                 self._go(State.PUSH, "ball is close")
             elif offset < -CENTRE_DEADBAND:
-                self._robot.drive("rotate_left", TURN_SPEED, TURN_MS)
+                self._robot.drive_async("rotate_left", TURN_SPEED, TURN_MS)
             elif offset > CENTRE_DEADBAND:
-                self._robot.drive("rotate_right", TURN_SPEED, TURN_MS)
+                self._robot.drive_async("rotate_right", TURN_SPEED, TURN_MS)
             else:
-                self._robot.drive("forward", FORWARD_SPEED, FORWARD_MS)
+                self._robot.drive_async("forward", FORWARD_SPEED, FORWARD_MS)
 
         elif self._state is State.PUSH:
             if wall.side == self._team():
@@ -163,8 +166,8 @@ class SimpleStrategy:
                 self._go(State.RETREAT, "own wall ahead")
             else:
                 # Opponent wall or unknown: shove, then re-check next tick.
-                self._robot.drive("forward", PUSH_SPEED, PUSH_MS)
+                self._robot.drive_async("forward", PUSH_SPEED, PUSH_MS)
 
         elif self._state is State.RETREAT:
-            self._robot.drive("backward", BACK_SPEED, BACK_MS)
+            self._robot.drive_async("backward", BACK_SPEED, BACK_MS)
             self._go(State.SEARCH, "backed off")

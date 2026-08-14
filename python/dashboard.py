@@ -80,6 +80,8 @@ class Dashboard:
         self._lock = threading.Lock()
         self._preview = b""
         self._last_preview_at = 0.0
+        self._pending_frame = None
+        self._pending_detections: list = []
         self._started_at = time.monotonic()
         self._state = {
             "state": "idle",
@@ -171,17 +173,12 @@ class Dashboard:
                         "red_pct": round(getattr(wall, "red_pct", 0.0), 2),
                         "blue_pct": round(getattr(wall, "blue_pct", 0.0), 2),
                     }
-                due = (now - self._last_preview_at) >= PREVIEW_INTERVAL_SECONDS
-
-            if frame is not None and due:
-                image = annotate(frame, detections)
-                ok, encoded = cv2.imencode(
-                    ".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, PREVIEW_JPEG_QUALITY]
-                )
-                if ok:
-                    with self._lock:
-                        self._preview = encoded.tobytes()
-                        self._last_preview_at = now
+                # Keep the raw frame only. Annotating and JPEG-encoding here
+                # would put ~10-30 ms of dashboard work on the robot's loop; it
+                # happens in api_preview() instead, on the HTTP thread.
+                if frame is not None:
+                    self._pending_frame = frame
+                    self._pending_detections = detections
         except Exception as err:  # telemetry must never break the robot loop
             with self._lock:
                 self._state["error"] = f"dashboard: {str(err)[:180]}"
@@ -292,6 +289,26 @@ class Dashboard:
             return {"ok": False, "error": str(err)[:180]}
 
     def api_preview(self) -> dict:
+        # Render on demand, so the cost lands on whoever is watching rather than
+        # on the robot's perception loop.
+        with self._lock:
+            frame = self._pending_frame
+            detections = list(self._pending_detections)
+            self._pending_frame = None
+
+        if frame is not None:
+            try:
+                image = annotate(frame, detections)
+                ok, encoded = cv2.imencode(
+                    ".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, PREVIEW_JPEG_QUALITY]
+                )
+                if ok:
+                    with self._lock:
+                        self._preview = encoded.tobytes()
+                        self._last_preview_at = time.monotonic()
+            except Exception as err:
+                self.note_error(f"preview: {err}")
+
         with self._lock:
             data = self._preview
         return {"image": base64.b64encode(data).decode("ascii") if data else ""}

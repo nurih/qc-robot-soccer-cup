@@ -24,13 +24,13 @@ MIN_CONFIDENCE = 0.5
 # instead of advancing. Wider means we charge rather than fussing over centring.
 TURN_DEADZONE = 0.24
 
-# Pulses stay short so every action is still followed by a fresh observation;
-# only the speeds go up. Turn pulses are shorter than before to compensate for
-# the higher rate, otherwise the robot overshoots the ball and oscillates.
+# Durations act as a dead-man timeout for drive_async: long enough to outlast one
+# perception loop so motion is continuous, short enough that a stalled loop stops
+# the robot promptly. Steering precision comes from the loop rate, not the pulse.
 TURN_SPEED = 200
-TURN_MS = 130
+TURN_MS = 300
 FORWARD_SPEED = 235
-FORWARD_MS = 200
+FORWARD_MS = 300
 
 # Stop advancing once this close, so the robot noses up to the ball rather than
 # driving through it. The ultrasonic is the only obstacle sense available.

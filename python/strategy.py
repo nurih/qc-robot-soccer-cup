@@ -31,9 +31,12 @@ PUSH_OBSTACLE_CM = 8            # ultrasonic distance treated as "hit something"
 LOST_BALL_GRACE_TICKS = 3       # consecutive missed detections tolerated before re-searching
 
 # Aggressive tuning: 255 is the firmware clamp.
-SEARCH_SPEED, SEARCH_MS = 215, 200
-PUSH_SPEED, PUSH_MS = 255, 400
-RETREAT_SPEED, RETREAT_MS = 220, 350
+# With drive_async the duration is no longer a motion quantum - it is a dead-man
+# timeout. It must outlast one loop iteration (~150 ms) so motion stays smooth
+# between commands, while still stopping the robot quickly if the loop dies.
+SEARCH_SPEED, SEARCH_MS = 215, 300
+PUSH_SPEED, PUSH_MS = 255, 300
+RETREAT_SPEED, RETREAT_MS = 220, 300
 
 
 class State(Enum):
@@ -78,9 +81,18 @@ class SoccerStrategy:
         self._state = State.SEARCH
         self._sensors = SensorMonitor()
         self._misses = 0
+        self._last_transition = ""
         # Optional read-only telemetry sink (see dashboard.Dashboard.publish).
         # It never influences decisions; failures in it must not stop the robot.
         self._observer = observer
+
+    def _go(self, new_state: "State", reason: str) -> None:
+        """Change state, recording why so the dashboard can show the path."""
+        if new_state is self._state:
+            return
+        self._last_transition = f"{self._state.value} -> {new_state.value} : {reason}"
+        print(f"[STRATEGY] {self._last_transition}")
+        self._state = new_state
 
     def close(self) -> None:
         self._camera.close()
@@ -96,8 +108,10 @@ class SoccerStrategy:
     def tick(self) -> None:
         frame, age_s = self._camera.read()
         if frame is None or age_s > self._config.stale_frame_s:
-            print(f"[STRATEGY] stale/missing camera frame ({age_s:.2f}s old) -> stop")
-            self._robot.stop()
+            # Issue no motion, but do NOT call robot.stop(): the firmware's stop
+            # also clears program_enabled, which would end the run on a single
+            # slow frame. Timed drives auto-stop, so skipping the tick is enough.
+            print(f"[STRATEGY] stale/missing camera frame ({age_s:.2f}s old) -> hold")
             return
 
         frame_h, frame_w = frame.shape[:2]
@@ -115,7 +129,7 @@ class SoccerStrategy:
         if ball is None:
             self._misses += 1
             if self._misses >= LOST_BALL_GRACE_TICKS:
-                self._state = State.SEARCH
+                self._go(State.SEARCH, "ball lost")
         else:
             self._misses = 0
 
@@ -141,6 +155,7 @@ class SoccerStrategy:
                 sensors=sensors,
                 ball=ball,
                 health=self._sensors.health(),
+                transition=self._last_transition,
             )
 
         if self._state is State.SEARCH:
@@ -154,9 +169,9 @@ class SoccerStrategy:
 
     def _do_search(self, ball: Optional[dict]) -> None:
         if ball is not None:
-            self._state = State.APPROACH
+            self._go(State.APPROACH, "ball seen")
             return
-        self._robot.drive("rotate_left", SEARCH_SPEED, SEARCH_MS)
+        self._robot.drive_async("rotate_left", SEARCH_SPEED, SEARCH_MS)
 
     def _do_approach(
         self,
@@ -173,17 +188,17 @@ class SoccerStrategy:
         action = self._follower.decide(detection, frame_w, sensors)
         if action is None:
             # BallFollower stops when ball is at arrived distance -- transition to push
-            self._state = State.PUSH
+            self._go(State.PUSH, "arrived at ball")
             return
 
         command, speed, ms = action
 
         # Override: if bbox height indicates the ball is very close, push regardless
         if _ball_height_fraction(ball, frame_h) >= CLOSE_HEIGHT_THRESHOLD:
-            self._state = State.PUSH
+            self._go(State.PUSH, "ball is close")
             return
 
-        self._robot.drive(command, speed, ms)
+        self._robot.drive_async(command, speed, ms)
 
     def _do_push(
         self,
@@ -194,26 +209,25 @@ class SoccerStrategy:
         sensors: dict,
     ) -> None:
         if ball is None:
-            self._state = State.APPROACH
+            self._go(State.APPROACH, "lost ball while pushing")
             return
 
         offset = _centre_offset(ball, frame_w)
         if offset is None or abs(offset) > REALIGN_DEADBAND:
-            self._state = State.APPROACH
+            self._go(State.APPROACH, "ball drifted off-centre")
             return
 
         ultrasonic_cm = sensors.get("ultrasonic_cm", -1)
 
         if wall.side == opponent:
-            self._robot.drive("forward", PUSH_SPEED, PUSH_MS)
+            self._robot.drive_async("forward", PUSH_SPEED, PUSH_MS)
         elif wall.side == "UNKNOWN":
             # Ambiguous wall color -- nudge forward cautiously and re-check
             # next tick instead of committing to a full push.
-            self._robot.drive("forward", PUSH_SPEED, PUSH_MS // 2)
+            self._robot.drive_async("forward", PUSH_SPEED, PUSH_MS // 2)
         else:
             # Own-side wall ahead -- pushing here risks an own goal.
-            print("[STRATEGY] own-side wall ahead while pushing -> retreat")
-            self._state = State.RETREAT
+            self._go(State.RETREAT, "own wall ahead")
             return
 
         if 0 < ultrasonic_cm <= PUSH_OBSTACLE_CM and wall.side != opponent:
@@ -221,5 +235,5 @@ class SoccerStrategy:
             self._state = State.RETREAT
 
     def _do_retreat(self) -> None:
-        self._robot.drive("backward", RETREAT_SPEED, RETREAT_MS)
-        self._state = State.SEARCH
+        self._robot.drive_async("backward", RETREAT_SPEED, RETREAT_MS)
+        self._go(State.SEARCH, "backed off")

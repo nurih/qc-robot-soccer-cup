@@ -12,18 +12,17 @@ ultrasonic distance sensor, 4-channel line sensor, onboard RGB LED and buzzer.
 
 **Vision:** Hiwonder ESP32-S3 camera → MJPEG stream at
 `http://192.168.5.1:81/stream` (320×240 QVGA).
-An Edge Impulse **object-detection** model (`.eim`, not committed — see
-`.gitignore`) runs on the Python/Linux side and exposes three classes:
-`soccerball`, `robot`, `goal`.
+An Edge Impulse object-detection model (`.eim`, not committed — see `.gitignore`)
+runs on the Python/Linux side and detects three classes: `soccerball`, `robot`,
+`goal`.
 
 **Field-side detection:** The field walls are taped RED or BLUE.
-`vision/wall_detector.py` identifies which color wall is in frame using HSV
-thresholding — no ML model required. This is the primary signal for knowing
-which goal the robot is facing.
+`vision/wall_detector.py` classifies which color dominates the current frame
+using HSV thresholding — no ML model required.
 
-**Team assignment:** Holding the CAM boot button for 5 seconds toggles the
-team (RED/BLUE). Read via `robot.hold_toggle()` — `False` = RED, `True` = BLUE.
-The strategy uses this to decide which wall color to drive toward.
+**Team assignment:** Holding the CAM boot button for 5 seconds toggles team
+(RED/BLUE). Read via `robot.hold_toggle()` — `False` = RED, `True` = BLUE.
+Strategy uses this to decide which wall color to push toward.
 
 ---
 
@@ -69,32 +68,6 @@ flowchart TD
 **Default / resting state is SEARCH.**
 The robot scans by rotating until it sees the ball.
 
-```mermaid
-stateDiagram-v2
-    [*] --> SEARCH
-
-    SEARCH --> APPROACH: ball detected
-    APPROACH --> PUSH: ball close or follower arrived
-    APPROACH --> SEARCH: ball missing for grace ticks
-
-    PUSH --> APPROACH: ball lost or needs realignment
-    PUSH --> RETREAT: own wall ahead or close obstacle
-    RETREAT --> SEARCH: backward pulse complete
-
-    state APPROACH {
-        [*] --> CenterBall
-        CenterBall --> Advance: ball centered
-        Advance --> CenterBall: ball drifts off-center
-    }
-
-    state "Safety stop" as STOP
-    SEARCH --> STOP: stale or missing frame
-    APPROACH --> STOP: stale or missing frame
-    PUSH --> STOP: stale or missing frame
-    RETREAT --> STOP: stale or missing frame
-    STOP --> SEARCH: valid frame on next tick
-```
-
 | State | Entry | Behavior | Exits to |
 |---|---|---|---|
 | `SEARCH` | startup; ball lost for ≥ `LOST_BALL_GRACE_TICKS` | Rotate left at `SEARCH_SPEED` | `APPROACH` when ball detected |
@@ -108,87 +81,124 @@ stateDiagram-v2
 
 ```
 python/
-├── main.py                   # App Lab entry point; builds strategy, runs loop
-├── robot_client.py           # MiniAutoRobot Bridge wrapper (do not scatter raw Bridge.call)
-├── strategy.py               # SoccerStrategy, State machine, Config
+├── main.py               # App Lab entry point; builds strategy, runs loop
+├── robot_client.py       # MiniAutoRobot Bridge wrapper (hardware API)
+│
+├── strategy.py           # SoccerStrategy state machine (SEARCH/APPROACH/PUSH/RETREAT)
+├── ball_follower.py      # Pure APPROACH-state decision logic — unit-testable, no hardware
+│
+├── detector.py           # Backend selector: brick or eim (DETECTOR_BACKEND env var)
+├── eim_runner.py         # Runs .eim over its native Unix socket protocol
+│
+├── debug_detect.py       # Live detection viewer — no motion, no BOOT gating
+├── capture.py            # Capture frames to disk for ML training
+│
 └── vision/
-    ├── __init__.py
-    ├── camera_stream.py      # CameraStream — timestamped MJPEG capture via OpenCV
-    ├── ball_detector.py      # BallDetector — Edge Impulse ImageImpulseRunner wrapper
-    └── wall_detector.py      # WallDetector — HSV red/blue wall classification
+    ├── camera_stream.py  # CameraStream — timestamped MJPEG capture via OpenCV
+    └── wall_detector.py  # WallDetector — HSV red/blue wall classification
 ```
+
+---
+
+## Module Descriptions
 
 ### `vision/camera_stream.py` — `CameraStream`
 
-Opens the ESP32-S3 MJPEG stream via `cv2.VideoCapture`. Warms up for
+Opens the ESP32-S3 MJPEG stream via `cv2.VideoCapture`. Warms up on
 `warmup_frames` good frames before returning. `read()` returns
-`(frame_bgr | None, age_seconds)` — `age_seconds` is a safety signal;
-strategy stops the robot if it exceeds `stale_frame_s`.
+`(frame_bgr | None, age_seconds)`. `age_seconds` is a first-class safety
+signal — strategy stops the robot if it exceeds `stale_frame_s`.
 
-### `vision/ball_detector.py` — `BallDetector`, `Detection`
+### `detector.py` — `make_detector()`
 
-Wraps `edge_impulse_linux.image.ImageImpulseRunner`. Normalizes bounding
-boxes against the model's actual crop size. `best(frame, label)` returns the
-highest-confidence detection for a given label, or `None`.
+Returns whichever inference backend is configured. Both expose the same call:
 
 ```python
-@dataclass
-class Detection:
-    label: str
-    confidence: float
-    x_center: float   # 0–1 fraction of frame width
-    y_center: float   # 0–1 fraction of frame height
-    width: float
-    height: float
+detector.detect(jpeg_bytes, image_type="jpg")
+# → {"detection": [{"class_name": str, "confidence": str, "bounding_box_xyxy": [x1,y1,x2,y2]}]}
 ```
+
+Bounding boxes are in **source-frame pixels** from both backends.
+Select backend via the `DETECTOR_BACKEND` environment variable:
+
+| Value | Backend | Needs |
+|---|---|---|
+| `brick` (default) | Arduino App Lab `object_detection` brick | Model registered in board registry |
+| `eim` | `eim_runner.py` — runs `.eim` via Unix socket | `EIM_MODEL_PATH` pointing to the `.eim` file |
+
+### `eim_runner.py` — `EimRunner`
+
+Launches the `.eim` as a subprocess and speaks its JSON-over-Unix-socket
+protocol. No `edge_impulse_linux` Python package required. Scales bbox
+coordinates from model-input pixels back to source-frame pixels so both
+backends report in the same space.
+
+### `ball_follower.py` — `BallFollower`
+
+Pure decision logic for the APPROACH state. Takes a detection payload, frame
+width, and sensor dict — returns `(command, speed, ms)` or `None` (stop).
+
+- Ball off-center → `rotate_left` / `rotate_right`
+- Ball centered + not arrived → `forward`
+- Ball centered + arrived (ultrasonic ≤ `arrived_distance_mm`) → `None`
+- No ball or bad bbox → `None`
+
+Also exports `_best_ball(detection)` and `_centre_offset(item, frame_w)` as
+helpers used by `strategy.py` for the PUSH state.
 
 ### `vision/wall_detector.py` — `WallDetector`, `WallReading`
 
-HSV-based — no model required. Classifies the dominant wall color in a frame
-as `"RED"`, `"BLUE"`, or `"UNKNOWN"`. Thresholds are tunable at construction
-(`min_coverage_pct`).
+HSV-based — no model required. Returns a `WallReading(side, red_pct, blue_pct)`
+where `side` is `"RED"`, `"BLUE"`, or `"UNKNOWN"`. Used by `strategy.py` to
+determine safe push direction during PUSH state.
 
 ### `strategy.py` — `SoccerStrategy`
 
-Injected with `MiniAutoRobot`, `CameraStream`, `BallDetector`, `WallDetector`,
-and a `Config`. Call `tick()` at ~20 Hz from the main loop. All robot motion
-happens here via `robot.drive()` — no direct `Bridge.call` outside
-`robot_client.py`.
+Injected with `MiniAutoRobot`, `CameraStream`, `detector`, `WallDetector`,
+and a `Config`. Call `tick()` at ~20 Hz. Encodes each OpenCV frame to JPEG
+before passing to the detector. All robot motion goes through `robot.drive()`.
+
+**State machine:**
+
+| State | Entry | Behavior | Exits to |
+|---|---|---|---|
+| `SEARCH` | startup; ball lost ≥ `LOST_BALL_GRACE_TICKS` | Rotate left to scan | `APPROACH` when ball detected |
+| `APPROACH` | Ball detected | Delegates to `BallFollower.decide()` for turn/forward | `PUSH` when follower returns `None` (arrived) or bbox height ≥ threshold |
+| `PUSH` | Ball close | Check wall color → push toward opponent wall; retreat on own wall | `RETREAT` on own wall; `APPROACH` if ball drifts |
+| `RETREAT` | Own-goal risk | Drive backward briefly | `SEARCH` |
 
 **Key tunable constants** (top of `strategy.py`):
 
 | Constant | Default | Description |
 |---|---|---|
-| `CENTER_DEADBAND` | `0.12` | Fraction of frame treated as centered on ball |
-| `REALIGN_DEADBAND` | `0.18` | Looser centering tolerance while already pushing |
-| `CLOSE_HEIGHT_THRESHOLD` | `0.35` | Ball bbox height fraction = "close enough to push" |
+| `CENTER_DEADBAND` | `0.12` | Offset fraction treated as centered on ball |
+| `REALIGN_DEADBAND` | `0.18` | Looser centering tolerance during PUSH |
+| `CLOSE_HEIGHT_THRESHOLD` | `0.35` | Ball bbox height fraction = close enough to push |
 | `PUSH_OBSTACLE_CM` | `8` | Ultrasonic below this while pushing = unexpected obstacle |
-| `LOST_BALL_GRACE_TICKS` | `3` | Missed detections before reverting to SEARCH |
-| `SEARCH_SPEED/MS` | `150 / 260` | Rotation speed and duration per scan tick |
-| `TURN_SPEED/MS` | `150 / 220` | Centering rotation on ball |
-| `APPROACH_SPEED/MS` | `170 / 350` | Forward approach |
-| `PUSH_SPEED/MS` | `190 / 400` | Forward push when at goal |
-| `RETREAT_SPEED/MS` | `160 / 400` | Backward retreat to avoid own goal |
+| `LOST_BALL_GRACE_TICKS` | `3` | Missed frames before reverting to SEARCH |
+
+`BallFollower` has its own tunable constants (`TURN_DEADZONE`, `ARRIVED_DISTANCE_MM`,
+`FORWARD_SPEED`, `TURN_SPEED`, etc.) at the top of `ball_follower.py`.
 
 ### `main.py` — Entry point
 
-Reads configuration from environment variables. Supports two modes via
-`ROBOCUP_MODE`:
+Supports two modes via `ROBOCUP_MODE`:
 
 | Mode | Behavior |
 |---|---|
 | `match` (default) | Builds strategy, runs `SoccerStrategy.tick()` loop |
-| `demo` | Runs canned motion/sensor smoke test — use to verify wiring |
+| `demo` | Canned motion/sensor smoke test — verify wiring before trusting vision |
 
 **Environment variables:**
 
 | Variable | Default | Description |
 |---|---|---|
-| `ROBOCUP_MODEL_PATH` | *(required)* | Path to the `.eim` model on the robot's filesystem |
+| `DETECTOR_BACKEND` | `brick` | `brick` or `eim` |
+| `EIM_MODEL_PATH` | `/app/models/soccer-fomo.eim` | Path to `.eim` (eim backend only) |
 | `CAMERA_STREAM_URL` | `http://192.168.5.1:81/stream` | Camera MJPEG URL |
 | `ROBOCUP_BALL_LABEL` | `soccerball` | Label string as exported from Edge Impulse |
 | `ROBOCUP_BALL_CONFIDENCE` | `0.5` | Minimum confidence threshold |
-| `ROBOCUP_WALL_MIN_COVERAGE_PCT` | `2.0` | Minimum % of frame with wall color to classify |
+| `ROBOCUP_WALL_MIN_COVERAGE_PCT` | `2.0` | Min % of frame with wall color to classify |
 | `ROBOCUP_STALE_FRAME_MS` | `500` | Max frame age in ms before stopping robot |
 | `ROBOCUP_MODE` | `match` | `match` or `demo` |
 
@@ -196,70 +206,96 @@ Reads configuration from environment variables. Supports two modes via
 
 ## Design Decisions
 
-These were made deliberately — don't reverse them without discussion.
-
 **Wall detection is HSV, not the EI model.**
 The field walls have consistent, high-saturation red/blue tape. HSV
-classification is fast, reliable, and requires no training data or model
-inference overhead. The EI model is reserved for object detection (ball, robot,
-goal).
+classification is fast, reliable, and adds no inference overhead. The EI model
+is reserved for object detection (ball, robot, goal).
 
-**Default state is SEARCH (rotate and scan), not stop.**
-A stationary robot loses without doing anything. Scanning maximizes the chance
-of finding the ball quickly from any starting orientation.
+**Dual detector backend (`brick` / `eim`).**
+The `brick` backend uses Arduino's built-in object detection — proven path but
+requires registering the model in a system-level registry that can be lost on
+updates. The `eim` backend runs the model directly via its socket protocol —
+no board-level setup, model path lives in code. Both return the same payload
+shape so the strategy layer is backend-agnostic.
 
-**The PUSH state uses wall color to determine safe push direction.**
-Rather than dead reckoning (which drifts without encoders), the robot reads the
-wall color directly while in possession of the ball. Opponent color ahead = push.
-Own color ahead = retreat to avoid own goal.
+**APPROACH delegates to `BallFollower`.**
+`BallFollower` is pure logic: no hardware calls, no imports from this project.
+It can be unit-tested offline and reused independently. `strategy.py` only
+invokes it and interprets `None` as "transition to PUSH."
 
-**Grace ticks before re-entering SEARCH.**
-`LOST_BALL_GRACE_TICKS = 3` prevents the robot from aborting an approach on a
-single bad frame (occlusion, motion blur). Increase if the robot jitters between
-states on a real frame stream.
+**Default state is SEARCH (rotate and scan).**
+A stationary robot loses. Scanning maximizes the chance of finding the ball
+quickly from any starting orientation.
+
+**Push direction is determined by wall color, not dead reckoning.**
+Dead reckoning drifts fast without encoders. Reading the wall color directly
+while in possession is more reliable for knowing which goal is ahead. Opponent
+color = safe to push. Own color = retreat to avoid own goal.
 
 **Stale frame = stop.**
 If the camera stream drops, the robot stops rather than continuing blind.
-This is a safety decision — do not remove the stale-frame check.
+Do not remove the stale-frame check.
 
 ---
 
 ## What Is Not Yet Implemented
 
-These are open areas for teammates to contribute:
+Open areas for teammates to pick up — all are self-contained changes to
+`strategy.py` and do not require touching firmware or `robot_client.py`:
 
-| Feature | Where | Notes |
-|---|---|---|
-| **Opponent robot detection** | `strategy.py` | `BallDetector.best(frame, "robot")` already works; use opponent position to block or evade |
-| **Goal object detection** | `strategy.py` | `BallDetector.best(frame, "goal")` already works; could refine push direction vs. wall color alone |
-| **Defend mode** | `strategy.py` | When ball is not visible and an opponent is detected, move to block rather than scan |
-| **Strafe to center on ball** | `strategy.py` | Mecanum supports sideways motion — strafing while approaching keeps the ball centered without rotation |
-| **Battery low warning** | `main.py` | `read_sensors()["battery_mv"]` < threshold → LED + buzz, slow speed |
+| Feature | Notes |
+|---|---|
+| **Opponent robot detection** | `_best_ball(detection)` already works for any label — use it with `"robot"` to detect opponents; add a DEFEND state or evasive motion |
+| **Goal object detection** | Same approach with `"goal"` label — could refine push direction vs. wall color alone |
+| **Strafe to center on ball** | Mecanum supports sideways motion — strafing during approach keeps the ball centered without rotating in place |
+| **Battery low warning** | `read_sensors()["battery_mv"]` < threshold → `robot.led(True)` + `robot.buzz()`, reduce speed |
+
+---
+
+## Quickstart
+
+```bash
+# Smoke test — verify motors, servo, sensors (no camera/model needed)
+ROBOCUP_MODE=demo python3 /app/python/main.py
+
+# Match mode — eim backend
+DETECTOR_BACKEND=eim \
+EIM_MODEL_PATH=/app/models/soccer-fomo.eim \
+ROBOCUP_MODE=match \
+python3 /app/python/main.py
+
+# Match mode — brick backend (model registered on board)
+ROBOCUP_MODE=match python3 /app/python/main.py
+
+# Debug detections without motion
+DETECTOR_BACKEND=eim \
+EIM_MODEL_PATH=/app/models/soccer-fomo.eim \
+python3 /app/python/debug_detect.py
+```
 
 ---
 
 ## Validation
 
-Run these before any hardware session:
-
 ```bash
-python3 -m py_compile python/*.py python/vision/*.py
+py -m py_compile python/*.py python/vision/*.py
 python3 .agents/skills/uno-q-miniauto/scripts/check_robot_contract.py --strict
 ```
 
 First hardware session checklist:
 1. Wheels off the ground
-2. `ROBOCUP_MODE=demo` — verify all motors, servo, LED, buzzer
-3. `ROBOCUP_MODE=match` — verify camera stream connects, model loads, labels print
-4. Lower the robot; test SEARCH rotation, then APPROACH with a ball placed in view
-5. Tune `CLOSE_HEIGHT_THRESHOLD` and `CENTER_DEADBAND` for your field conditions
+2. `ROBOCUP_MODE=demo` — verify all motors, servo, LED, buzzer respond
+3. `ROBOCUP_MODE=match` — confirm camera connects and model loads (labels print to console)
+4. Lower the robot; place ball in view and verify SEARCH → APPROACH transition
+5. Tune `CLOSE_HEIGHT_THRESHOLD`, `CENTER_DEADBAND`, and `BallFollower.arrived_distance_mm`
+   for your field and lighting conditions
 
 ---
 
 ## Safety Rules
 
 - Every entry point that moves hardware must use `try/finally: robot.stop()`.
-- Use `App.run(user_loop=lambda: robot.run_program(loop))` — the CAM button is the physical kill switch.
+- Use `App.run(user_loop=lambda: robot.run_program(loop))` — CAM button is the physical kill switch.
 - `robot.drive()` checks `program_enabled` and raises `ProgramStopped` on button press.
-- Never bypass `robot.stop()` cleanup in `run_program`.
 - Strategy failures (stale frame, no model, exception) must stop the robot, not continue blind.
+- Never scatter `Bridge.call(...)` outside `robot_client.py`.

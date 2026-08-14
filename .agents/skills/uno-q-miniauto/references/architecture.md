@@ -7,6 +7,7 @@ Read this reference before modifying the robot. Re-check the live files because 
 - `sketch/sketch.ino`: Arduino UNO Q MCU firmware. Own direct hardware I/O, mecanum mixing, command parsing, motor timeouts, start/stop state, sensors, servo, buzzer, LEDs, and Router Bridge RPC providers.
 - `python/robot_client.py`: Linux-side typed facade. Own Bridge serialization, program-running guards, routine interruption, and caller-friendly return values.
 - `python/main.py`: Example App Lab behavior. Use it as the starting point for custom policies and sequences, or move substantial behavior into focused modules under `python/`.
+- `python/capture.py`: Edge Impulse dataset capture utility. It reads the camera MJPEG stream, previews frames through App Lab WebUI, and is intended to save control-selected JPEGs under `captures/`; read the Edge Impulse reference for its current Bridge prerequisite.
 - `sketch/sketch.yaml`: UNO Q `arduino:zephyr` platform and `Arduino_RouterBridge` dependency.
 - `app.yaml`: App Lab application metadata.
 - `camera/HiwonderCamStream/HiwonderCamStream.ino`: Independent Hiwonder ESP32-S3 GC2145 camera firmware. It hosts an MJPEG stream and exposes its button state to the UNO Q over I2C.
@@ -77,11 +78,13 @@ The sensor JSON currently includes robot and MCU identity, IR compatibility stat
 
 ### Add vision or an ML model
 
+Read [edge-impulse.md](edge-impulse.md) for the repository's dataset, Edge Impulse training/export, and inference-integration workflow.
+
 1. Keep camera capture/stream transport separate from the movement fail-safe.
 2. Put inference and policy code on the Linux/Python side unless MCU execution is an explicit, feasible requirement.
-3. Make camera endpoint, thresholds, labels, and team selection configurable rather than hard-coded across modules.
-4. Define behavior for stale frames, no detections, ambiguous detections, and unavailable models; the safe default is stop.
-5. Keep model artifacts outside this repository and document how the user supplies them at runtime.
+3. Make camera endpoint, model path, thresholds, labels, and team selection configurable rather than hard-coded across modules.
+4. Define behavior for stale frames, no detections, ambiguous detections, runtime errors, and unavailable models; the safe default is stop.
+5. Keep generated model artifacts untracked and document how the user supplies them to the runtime.
 
 ## Static inspection shortcuts
 

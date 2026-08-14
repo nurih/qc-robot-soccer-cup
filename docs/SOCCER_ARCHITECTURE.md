@@ -28,41 +28,52 @@ Strategy uses this to decide which wall color to push toward.
 
 ## System Diagram
 
+```mermaid
+flowchart TD
+    Camera["ESP32-S3 camera\nMJPEG stream"]
+
+    subgraph Vision["VISION (python/vision/)"]
+        Stream["CameraStream"]
+        Ball["BallDetector (.eim)"]
+        Wall["WallDetector (HSV)"]
+        Detection["Detection bbox"]
+        Reading["WallReading"]
+
+        Stream --> Ball --> Detection
+        Stream --> Wall --> Reading
+    end
+
+    subgraph Strategy["STRATEGY (python/strategy.py)"]
+        Tick["SoccerStrategy.tick()\n~20 Hz"]
+        Machine["SEARCH / APPROACH / PUSH / RETREAT"]
+        Tick --> Machine
+    end
+
+    subgraph Hardware["HARDWARE"]
+        Client["MiniAutoRobot\n(python/robot_client.py)"]
+        Firmware["UNO Q firmware\n(sketch/sketch.ino)"]
+        Client --> Firmware
+    end
+
+    Camera --> Stream
+    Detection --> Tick
+    Reading --> Tick
+    Machine -->|"robot.drive() / robot.stop()"| Client
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                     VISION  (python/vision/)                  │
-│                                                              │
-│  CameraStream ──────────────────────────────► BGR frame      │
-│       │                                           │          │
-│       │ (JPEG bytes via cv2.imencode)             │          │
-│       ▼                                           ▼          │
-│  detector.detect(jpeg) ──► detection dict   WallDetector     │
-│  (brick or eim backend)                     ──► WallReading  │
-└────────────────────────────┬─────────────────────────────────┘
-                             │ detection dict, WallReading,
-                             │ frame dimensions, sensors
-┌────────────────────────────▼─────────────────────────────────┐
-│                  STRATEGY  (python/strategy.py)               │
-│                                                              │
-│  SoccerStrategy.tick()  called every ~50 ms                  │
-│                                                              │
-│   ┌─────────┐  ball detected  ┌──────────┐                   │
-│   │  SEARCH │───────────────► │ APPROACH │                   │
-│   └─────────┘                 └────┬─────┘                   │
-│        ▲   ◄── ball lost ─────────┘│  ball arrived           │
-│        │                      ┌────▼─────┐  (BallFollower    │
-│        │   ◄── ball lost ─────│   PUSH   │   returns None)   │
-│        │                      └────┬─────┘                   │
-│        │   ◄── own wall ahead ─────┘│  own wall = retreat    │
-│        │                      ┌────▼─────┐                   │
-│        └───────── done ───────│ RETREAT  │                   │
-│                               └──────────┘                   │
-└────────────────────────────┬─────────────────────────────────┘
-                             │ robot.drive() / robot.stop()
-┌────────────────────────────▼─────────────────────────────────┐
-│          HARDWARE  robot_client.py → sketch/sketch.ino        │
-└──────────────────────────────────────────────────────────────┘
-```
+
+---
+
+## States
+
+**Default / resting state is SEARCH.**
+The robot scans by rotating until it sees the ball.
+
+| State | Entry | Behavior | Exits to |
+|---|---|---|---|
+| `SEARCH` | startup; ball lost for ≥ `LOST_BALL_GRACE_TICKS` | Rotate left at `SEARCH_SPEED` | `APPROACH` when ball detected |
+| `APPROACH` | Ball detected | If offset > `CENTER_DEADBAND` → rotate to center; else drive forward | `PUSH` when ball bbox height ≥ `CLOSE_HEIGHT_THRESHOLD`; `SEARCH` if ball lost |
+| `PUSH` | Ball close (bbox height) | Check wall color → if opponent wall: push forward; if own wall: retreat | `RETREAT` if own wall; `APPROACH` if ball drifts off-center |
+| `RETREAT` | Own-goal risk detected | Drive backward briefly | `SEARCH` |
 
 ---
 

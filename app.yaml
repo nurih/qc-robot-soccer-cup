@@ -1,10 +1,11 @@
 name: Qualcomm/AI-LA Robot Soccer Cup
 description: Hiwonder miniAuto UNO Q App Lab project for simple Bridge-driven robot motion.
-ports: []
+ports: [7000]
 # "soccer-fomo" is a custom Edge Impulse model registered on the board, not a
 # builtin. The .eim itself is deliberately kept out of this repo; see README for
 # how to install and register it.
 bricks:
   - arduino:object_detection:
       model: soccer-fomo
+  - arduino:web_ui
 icon: "\U0001F697"

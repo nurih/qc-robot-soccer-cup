@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>miniAuto - ball following</title>
+<style>
+  :root {
+    --bg: #10131a;
+    --panel: #181c26;
+    --line: #262c3a;
+    --text: #e7ebf3;
+    --muted: #8b95ab;
+    --ok: #3ecf7a;
+    --warn: #e8b83e;
+    --bad: #e35d6a;
+    --accent: #5aa9ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px;
+    background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; font-weight: 600; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 18px; }
+  .grid { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(280px, 1fr); gap: 16px; align-items: start; }
+  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+  #feed { width: 100%; border-radius: 8px; display: block; background: #000; aspect-ratio: 4 / 3; object-fit: contain; }
+  .action { font-size: 22px; font-weight: 600; margin: 6px 0 2px; }
+  .action.stop { color: var(--muted); }
+  .action.go { color: var(--ok); }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .pill.on { background: rgba(62,207,122,.15); color: var(--ok); }
+  .pill.off { background: rgba(139,149,171,.15); color: var(--muted); }
+  .pill.bad { background: rgba(227,93,106,.15); color: var(--bad); }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 5px 0; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  tr:last-child td { border-bottom: none; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .kv { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid var(--line); }
+  .kv:last-child { border-bottom: none; }
+  .kv span:first-child { color: var(--muted); }
+  .bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin-top: 6px; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  .err { color: var(--bad); font-size: 12px; margin-top: 8px; word-break: break-word; }
+  .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+  <h1>miniAuto &mdash; ball following</h1>
+  <div class="sub">Live perception and policy. Perception runs continuously; motion only while the program is enabled via the BOOT button.</div>
+
+  <div class="grid">
+    <div class="panel">
+      <h2>Camera <span id="camPill" class="pill off">connecting</span></h2>
+      <img id="feed" alt="camera feed">
+      <div class="kv"><span>Ball seen</span><span id="ballRate">&ndash;</span></div>
+      <div class="bar"><i id="ballBar" style="width:0%"></i></div>
+      <div class="kv"><span>Frames / rate</span><span id="frames">&ndash;</span></div>
+      <div class="kv"><span>Backend</span><span id="backend" class="muted">&ndash;</span></div>
+      <div id="err" class="err"></div>
+    </div>
+
+    <div>
+      <div class="panel" style="margin-bottom:16px">
+        <h2>Decision</h2>
+        <div id="action" class="action stop">&ndash;</div>
+        <div class="kv"><span>Program</span><span id="prog" class="pill off">idle</span></div>
+        <div class="kv"><span>Motion allowed</span><span id="motion" class="pill off">no</span></div>
+        <div class="kv"><span>Team</span><span id="team">&ndash;</span></div>
+      </div>
+
+      <div class="panel" style="margin-bottom:16px">
+        <h2>Detections</h2>
+        <table>
+          <thead><tr><th>Label</th><th class="num">Conf</th><th class="num">Centre x</th></tr></thead>
+          <tbody id="dets"><tr><td colspan="3" class="muted">none</td></tr></tbody>
+        </table>
+      </div>
+
+      <div class="panel">
+        <h2>Sensors</h2>
+        <div class="kv"><span>Ultrasonic</span><span id="ultra">&ndash;</span></div>
+        <div class="kv"><span>Line sensor</span><span id="line">&ndash;</span></div>
+        <div class="kv"><span>Battery</span><span id="batt">&ndash;</span></div>
+      </div>
+    </div>
+  </div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+function pill(el, on, textOn, textOff, badWhenOff) {
+  el.textContent = on ? textOn : textOff;
+  el.className = 'pill ' + (on ? 'on' : (badWhenOff ? 'bad' : 'off'));
+}
+
+async function tickState() {
+  try {
+    const s = await (await fetch('/state')).json();
+
+    const act = s.action || 'stop';
+    $('action').textContent = act;
+    $('action').className = 'action ' + (act.startsWith('stop') ? 'stop' : 'go');
+
+    pill($('camPill'), s.connected, 'live', 'no stream', true);
+    $('ballRate').textContent = s.ball_rate + '%';
+    $('ballBar').style.width = Math.min(100, s.ball_rate) + '%';
+    $('frames').textContent = s.frames + '  (' + s.fps + ' fps)';
+    $('backend').textContent = s.backend || 'brick';
+    $('err').textContent = s.error || '';
+
+    const sensors = s.sensors || {};
+    pill($('prog'), !!sensors.program_enabled, 'running', 'idle', false);
+    pill($('motion'), !!s.motion_enabled, 'yes', 'no', false);
+    $('team').textContent = sensors.hold_toggle === undefined ? '–' : (sensors.hold_toggle ? 'BLUE' : 'RED');
+
+    const mm = sensors.ultrasonic_mm;
+    $('ultra').textContent = (mm === undefined) ? '–' : (mm > 0 ? mm + ' mm' : 'unavailable');
+    $('ultra').className = (mm !== undefined && mm <= 0) ? 'muted' : '';
+    $('line').textContent = sensors.line_ok === undefined ? '–'
+      : (sensors.line_ok ? JSON.stringify(sensors.line_digital || []) : 'unavailable');
+    $('batt').textContent = sensors.battery_mv ? (sensors.battery_mv / 1000).toFixed(2) + ' V' : '–';
+
+    const body = $('dets');
+    if (!s.detections.length) {
+      body.innerHTML = '<tr><td colspan="3" class="muted">none</td></tr>';
+    } else {
+      body.innerHTML = s.detections.map(d => {
+        const cx = d.box.length >= 3 ? ((d.box[0] + d.box[2]) / 2).toFixed(0) : '–';
+        const strong = d.label === 'soccer_ball' ? ' style="color:var(--ok);font-weight:600"' : '';
+        return `<tr><td${strong}>${d.label}</td><td class="num">${d.confidence}%</td><td class="num">${cx}</td></tr>`;
+      }).join('');
+    }
+  } catch (e) {
+    $('err').textContent = 'dashboard: ' + e;
+  }
+}
+
+async function tickPreview() {
+  try {
+    const p = await (await fetch('/preview')).json();
+    if (p.image) $('feed').src = 'data:image/jpeg;base64,' + p.image;
+  } catch (e) { /* keep the last frame on a hiccup */ }
+}
+
+setInterval(tickState, 400);
+setInterval(tickPreview, 300);
+tickState();
+tickPreview();
+</script>
+</body>
+</html>

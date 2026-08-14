@@ -52,7 +52,7 @@
 </head>
 <body>
   <h1>miniAuto &mdash; ball following</h1>
-  <div class="sub">Live perception and policy. Perception runs continuously; motion only while the program is enabled via the BOOT button.</div>
+  <div class="sub">Live view of the soccer strategy: camera, detections, wall side, and state machine. Read-only &mdash; it never drives the robot.</div>
 
   <div class="grid">
     <div class="panel">
@@ -67,11 +67,12 @@
 
     <div>
       <div class="panel" style="margin-bottom:16px">
-        <h2>Decision</h2>
+        <h2>Strategy</h2>
         <div id="action" class="action stop">&ndash;</div>
         <div class="kv"><span>Program</span><span id="prog" class="pill off">idle</span></div>
-        <div class="kv"><span>Motion allowed</span><span id="motion" class="pill off">no</span></div>
         <div class="kv"><span>Team</span><span id="team">&ndash;</span></div>
+        <div class="kv"><span>Wall ahead</span><span id="wall">&ndash;</span></div>
+        <div class="kv"><span>Wall coverage</span><span id="wallpct" class="muted">&ndash;</span></div>
       </div>
 
       <div class="panel" style="margin-bottom:16px">
@@ -103,21 +104,25 @@ async function tickState() {
   try {
     const s = await (await fetch('/state')).json();
 
-    const act = s.action || 'stop';
-    $('action').textContent = act;
-    $('action').className = 'action ' + (act.startsWith('stop') ? 'stop' : 'go');
+    const act = s.state || 'idle';
+    $('action').textContent = act.toUpperCase();
+    $('action').className = 'action ' + (act === 'idle' ? 'stop' : 'go');
 
-    pill($('camPill'), s.connected, 'live', 'no stream', true);
+    pill($('camPill'), s.ticks > 0, 'live', 'waiting', false);
     $('ballRate').textContent = s.ball_rate + '%';
     $('ballBar').style.width = Math.min(100, s.ball_rate) + '%';
-    $('frames').textContent = s.frames + '  (' + s.fps + ' fps)';
+    $('frames').textContent = s.ticks + '  (' + s.tick_rate + '/s)';
     $('backend').textContent = s.backend || 'brick';
     $('err').textContent = s.error || '';
 
     const sensors = s.sensors || {};
     pill($('prog'), !!sensors.program_enabled, 'running', 'idle', false);
-    pill($('motion'), !!s.motion_enabled, 'yes', 'no', false);
-    $('team').textContent = sensors.hold_toggle === undefined ? '–' : (sensors.hold_toggle ? 'BLUE' : 'RED');
+    $('team').textContent = s.team || (sensors.hold_toggle === undefined ? '–' : (sensors.hold_toggle ? 'BLUE' : 'RED'));
+
+    const wall = s.wall || {};
+    $('wall').textContent = wall.side || '–';
+    $('wallpct').textContent = (wall.side === undefined) ? '–'
+      : 'red ' + (wall.red_pct ?? 0) + '%  blue ' + (wall.blue_pct ?? 0) + '%';
 
     const mm = sensors.ultrasonic_mm;
     $('ultra').textContent = (mm === undefined) ? '–' : (mm > 0 ? mm + ' mm' : 'unavailable');

@@ -1,269 +1,119 @@
-"""
-main.py  -  soccer ball follower with a live web dashboard.
-
-Two loops:
-
-  * A perception thread continuously grabs a frame, runs the model, and works out
-    what the follower *would* do. It never touches the Bridge, so it is safe to
-    run alongside the motion loop, and it keeps the dashboard live even while the
-    robot is idle.
-
-  * The follow routine, gated by the BOOT button, reads the latest decision and
-    issues one short guarded motion at a time.
-
-Dashboard: http://<board-ip>:7000 (join the camera's Wi-Fi AP to reach it).
-
-Motion is gated three ways: MOTION_ENABLED below, the BOOT button program-enable
-flow, and robot.stop() in a finally block.
-"""
-import base64
-import io
-import threading
+import os
 import time
 
-from pathlib import Path
-
-import cv2
-import numpy as np
-import requests
-
 from arduino.app_utils import App
-from arduino.app_bricks.web_ui import WebUI
-
-from ball_follower import BallFollower, describe_action
+from dashboard import Dashboard
 from detector import make_detector
-from robot_client import MiniAutoRobot
-
-CAMERA_URL = "http://192.168.5.1:81/stream"
-
-PROJECT_FOLDER = Path(__file__).resolve().parent.parent
-CAPTURES_FOLDER = PROJECT_FOLDER / "captures"
-
-STREAM_TIMEOUT_SECONDS = 10
-FRAME_READ_TIMEOUT_SECONDS = 15
-
-# Set True only with the robot in a safe setup (wheels raised or clear floor
-# space) and someone able to reach the power switch.
-MOTION_ENABLED = True
-
-PERCEPTION_INTERVAL_SECONDS = 0.05
-PREVIEW_JPEG_QUALITY = 80
-
-# Show low-confidence detections on the dashboard so near-misses are visible
-# while tuning; the follower applies its own MIN_CONFIDENCE separately.
-REPORT_CONFIDENCE = 0.01
+from robot_client import MiniAutoRobot, ProgramStopped
+from strategy import Config, SoccerStrategy
+from vision.camera_stream import CameraStream
+from vision.wall_detector import WallDetector
 
 robot = MiniAutoRobot()
-follower = BallFollower()
 
-_lock = threading.Lock()
-_state = {
-    "connected": False,
-    "detections": [],
-    "action": None,
-    "sensors": {},
-    "frames": 0,
-    "ball_frames": 0,
-    "fps": 0.0,
-    "backend": "",
-    "motion_enabled": MOTION_ENABLED,
-    "error": "",
-}
-_preview_jpeg = b""
+CAMERA_URL = os.environ.get("CAMERA_STREAM_URL", "http://192.168.5.1:81/stream")
+BALL_LABEL = os.environ.get("ROBOCUP_BALL_LABEL", "soccerball")
+BALL_CONFIDENCE = float(os.environ.get("ROBOCUP_BALL_CONFIDENCE", "0.5"))
+WALL_MIN_COVERAGE_PCT = float(os.environ.get("ROBOCUP_WALL_MIN_COVERAGE_PCT", "2.0"))
+STALE_FRAME_S = int(os.environ.get("ROBOCUP_STALE_FRAME_MS", "500")) / 1000.0
+MODE = os.environ.get("ROBOCUP_MODE", "match")  # "match" or "demo"
+DASHBOARD = os.environ.get("ROBOCUP_DASHBOARD", "1") not in {"0", "false", "False"}
 
-
-def grab_frame(url: str = CAMERA_URL, timeout: int = FRAME_READ_TIMEOUT_SECONDS) -> bytes | None:
-    """Read the MJPEG stream until one complete JPEG (SOI..EOI) arrives."""
-    deadline = time.monotonic() + timeout
-    buffer = b""
-    response = None
-    try:
-        response = requests.get(url, stream=True, timeout=(5, STREAM_TIMEOUT_SECONDS))
-        response.raise_for_status()
-        for chunk in response.iter_content(chunk_size=4096):
-            if time.monotonic() > deadline:
-                return None
-            buffer += chunk
-            start = buffer.find(b"\xff\xd8")
-            end = buffer.find(b"\xff\xd9", start + 2)
-            if start != -1 and end != -1:
-                return buffer[start:end + 2]
-    except requests.exceptions.RequestException as err:
-        with _lock:
-            _state["error"] = str(err)[:200]
-    finally:
-        if response is not None:
-            response.close()
-    return None
-
-
-def as_fraction(confidence) -> float:
-    """The runner reports confidence as a percentage string; normalise to 0..1."""
-    try:
-        value = float(confidence)
-    except (TypeError, ValueError):
-        return 0.0
-    return value / 100.0 if value > 1.0 else value
-
-
-def annotate(jpeg: bytes, detections: list) -> bytes:
-    """Draw detection boxes onto the frame, returning JPEG bytes."""
-    image = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
-    if image is None:
-        return jpeg
-
-    height, width = image.shape[:2]
-    cv2.line(image, (width // 2, 0), (width // 2, height), (90, 90, 90), 1)
-
-    for item in detections:
-        label = str(item.get("class_name", "?"))
-        score = as_fraction(item.get("confidence"))
-        box = item.get("bounding_box_xyxy") or [0, 0, 0, 0]
-        x1, y1, x2, y2 = (int(float(v)) for v in box[:4])
-        # Ball in green, everything else muted so the target stands out.
-        colour = (80, 220, 90) if label == "soccer_ball" else (170, 170, 170)
-        cv2.rectangle(image, (x1, y1), (x2, y2), colour, 2)
-        cv2.putText(
-            image, f"{label} {score:.0%}", (x1, max(12, y1 - 4)),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.4, colour, 1, cv2.LINE_AA,
-        )
-
-    ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, PREVIEW_JPEG_QUALITY])
-    return encoded.tobytes() if ok else jpeg
-
-
-def perception_loop() -> None:
-    """Continuously perceive. Never calls the Bridge, so it is safe in a thread."""
-    global _preview_jpeg
-
-    detector = make_detector(confidence=REPORT_CONFIDENCE)
-    with _lock:
-        _state["backend"] = getattr(detector, "model_path", "brick")
-
-    last = time.monotonic()
-    while True:
-        jpeg = grab_frame()
-        if jpeg is None:
-            with _lock:
-                _state["connected"] = False
-            time.sleep(1.0)
-            continue
-
-        try:
-            result = detector.detect(jpeg, image_type="jpg")
-        except Exception as err:  # keep perceiving even if one inference fails
-            with _lock:
-                _state["error"] = f"inference: {str(err)[:180]}"
-            time.sleep(0.5)
-            continue
-
-        detections = (result or {}).get("detection") or []
-
-        with _lock:
-            sensors = dict(_state["sensors"])
-        action = follower.decide(result, 320, sensors)
-
-        preview = annotate(jpeg, detections)
-        now = time.monotonic()
-        elapsed = now - last
-        last = now
-
-        with _lock:
-            _state["connected"] = True
-            _state["error"] = ""
-            _state["detections"] = detections
-            _state["action"] = action
-            _state["frames"] += 1
-            if any(str(d.get("class_name")) == "soccer_ball" for d in detections):
-                _state["ball_frames"] += 1
-            if elapsed > 0:
-                _state["fps"] = round(1.0 / elapsed, 1)
-            _preview_jpeg = preview
-
-        time.sleep(PERCEPTION_INTERVAL_SECONDS)
-
-
-def follow_routine() -> None:
-    """Act on the latest decision until the BOOT button disables the program.
-
-    run_program() runs this once per button press, so the loop lives here.
-    robot.stop() is never called from inside it: stop() also clears
-    program_enabled and would end the session. Motion is already bounded by the
-    firmware's timed auto-stop, so "stop" simply means issue no new motion.
-    """
-    while robot.is_running():
-        with _lock:
-            action = _state["action"]
-
-        if action is not None and MOTION_ENABLED:
-            command, speed, ms = action
-            robot.drive(command, speed, ms)
-        else:
-            time.sleep(0.05)
-
-
-# -- web dashboard ---------------------------------------------------------
-
-def api_state() -> dict:
-    with _lock:
-        frames = _state["frames"]
-        ball_frames = _state["ball_frames"]
-        return {
-            "connected": _state["connected"],
-            "detections": [
-                {
-                    "label": d.get("class_name"),
-                    "confidence": round(as_fraction(d.get("confidence")) * 100, 1),
-                    "box": [round(float(v), 1) for v in (d.get("bounding_box_xyxy") or [])],
-                }
-                for d in _state["detections"]
-            ],
-            "action": describe_action(_state["action"]).replace("[POLICY] ", ""),
-            "sensors": _state["sensors"],
-            "frames": frames,
-            "ball_rate": round(100.0 * ball_frames / frames, 1) if frames else 0.0,
-            "fps": _state["fps"],
-            "backend": _state["backend"],
-            "motion_enabled": _state["motion_enabled"],
-            "error": _state["error"],
-        }
-
-
-def api_preview() -> dict:
-    with _lock:
-        data = _preview_jpeg
-    if not data:
-        return {"image": ""}
-    return {"image": base64.b64encode(data).decode("ascii")}
-
-
-ui = WebUI(assets_dir_path=str(PROJECT_FOLDER / "assets"))
-ui.expose_api("GET", "/state", api_state)
-ui.expose_api("GET", "/preview", api_preview)
+# Read-only telemetry sink; attaching it cannot change robot behaviour.
+dashboard = Dashboard(backend=os.environ.get("DETECTOR_BACKEND", "brick")) if DASHBOARD else None
 
 print(f"health   : {robot.health()}")
 print(f"sensors  : {robot.read_sensors()}")
-print(f"[INFO] motion {'ENABLED' if MOTION_ENABLED else 'DISABLED (observe only)'}")
-print(f"[INFO] dashboard: {ui.url}")
 
-threading.Thread(target=perception_loop, daemon=True).start()
+# Track the toggle so we only print when it actually changes.
+# Hold the CAM boot button for 5 seconds to switch teams.
+_last_toggle = robot.hold_toggle()
+print(f"[TEAM] active team: {'BLUE' if _last_toggle else 'RED'}  (hold CAM button 5 s to switch)")
 
 
-def user_loop() -> None:
-    """Refresh sensors for the dashboard and policy, then run the gated routine."""
+def demo_sequence() -> None:
+    """Original canned motion/sensor smoke test. Set ROBOCUP_MODE=demo to run
+    this instead of the match strategy -- useful for verifying drive/servo/
+    sensor wiring before trusting the vision pipeline."""
+
+    def drive(direction: str, speed: int = 150, ms: int = 500) -> None:
+        print(f"  {direction} speed={speed} ms={ms}")
+        robot.drive(direction, speed, ms)
+
+    drive("forward",      speed=150, ms=500)
+    drive("backward",     speed=150, ms=500)
+    drive("left",         speed=150, ms=500)   # strafe left
+    drive("right",        speed=150, ms=500)   # strafe right
+    drive("rotate_left",  speed=255, ms=3250)  # spin in place, 255 firmware cap on speed
+    time.sleep(0.5)
+    drive("rotate_right", speed=255, ms=3250)
+
+    robot.stop()
+    time.sleep(0.5)
+
+    sensors = robot.read_sensors()
+    print(f"ultrasonic : {sensors.get('ultrasonic_cm')} cm")
+    print(f"battery    : {sensors.get('battery_mv')} mV")
+    print(f"line       : {sensors.get('line_digital')}")
+
+    robot.led(True)
+    robot.servo(90)
+    robot.servo(150)
+    robot.servo(30)
+    robot.servo(90)
+    robot.led(False)
+
+    robot.stop()
+
+
+def _build_strategy() -> SoccerStrategy:
+    camera = CameraStream(CAMERA_URL)
+    detector = make_detector(confidence=BALL_CONFIDENCE)
+    wall_detector = WallDetector(min_coverage_pct=WALL_MIN_COVERAGE_PCT)
+
+    camera.open()
+
+    return SoccerStrategy(
+        robot,
+        camera,
+        detector,
+        wall_detector,
+        config=Config(stale_frame_s=STALE_FRAME_S, ball_label=BALL_LABEL),
+        observer=dashboard.publish if dashboard is not None else None,
+    )
+
+
+def run_match() -> None:
+    strategy = _build_strategy()
     try:
-        sensors = robot.read_sensors()
-        with _lock:
-            _state["sensors"] = sensors
-    except Exception as err:
-        with _lock:
-            _state["error"] = f"sensors: {str(err)[:180]}"
+        while True:
+            if not robot.is_running():
+                raise ProgramStopped
+            strategy.tick()
+            time.sleep(0.05)
+    finally:
+        strategy.close()
 
-    robot.run_program(follow_routine)
+
+def loop() -> None:
+    global _last_toggle
+    current = robot.hold_toggle()
+    if current != _last_toggle:
+        _last_toggle = current
+        team = "BLUE" if current else "RED"
+        print(f"[TEAM] switched to: {team}")
+
+    if MODE == "demo":
+        demo_sequence()
+    else:
+        run_match()
 
 
+print(f"[INFO] mode: {MODE}")
+if dashboard is not None:
+    print(f"[INFO] dashboard: {dashboard.url}")
 print("[INFO] waiting for BOOT button to start...")
 try:
-    App.run(user_loop=user_loop)
+    App.run(user_loop=lambda: robot.run_program(loop))
 finally:
     robot.stop()

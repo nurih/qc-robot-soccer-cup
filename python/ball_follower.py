@@ -17,19 +17,24 @@ BALL_LABELS = {"soccer_ball", "soccerball", "ball"}
 
 MIN_CONFIDENCE = 0.5
 
-# Fraction of half-frame width the ball may be off-centre before we rotate
-# instead of advancing.
-TURN_DEADZONE = 0.18
+# Tuned aggressively: the firmware clamps speed at 255, and closing distance fast
+# matters more than smooth tracking in a 5-minute match.
 
-# Short pulses so every action is followed by a fresh observation.
-TURN_SPEED = 120
-TURN_MS = 180
-FORWARD_SPEED = 130
+# Fraction of half-frame width the ball may be off-centre before we rotate
+# instead of advancing. Wider means we charge rather than fussing over centring.
+TURN_DEADZONE = 0.24
+
+# Pulses stay short so every action is still followed by a fresh observation;
+# only the speeds go up. Turn pulses are shorter than before to compensate for
+# the higher rate, otherwise the robot overshoots the ball and oscillates.
+TURN_SPEED = 200
+TURN_MS = 130
+FORWARD_SPEED = 235
 FORWARD_MS = 200
 
 # Stop advancing once this close, so the robot noses up to the ball rather than
 # driving through it. The ultrasonic is the only obstacle sense available.
-ARRIVED_DISTANCE_MM = 130
+ARRIVED_DISTANCE_MM = 110
 
 
 def _best_ball(detection: dict | None) -> dict | None:

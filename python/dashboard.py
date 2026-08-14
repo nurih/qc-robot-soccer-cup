@@ -80,6 +80,7 @@ class Dashboard:
             "ball_ticks": 0,
             "tick_rate": 0.0,
             "backend": backend,
+            "health": {},
             "error": "",
         }
         self._last_tick_at = 0.0
@@ -112,6 +113,7 @@ class Dashboard:
         sensors: dict | None = None,
         ball: dict | None = None,
         transition: str = "",
+        health: dict | None = None,
     ) -> None:
         """Record one tick of telemetry. Cheap, and never raises into the caller."""
         try:
@@ -136,6 +138,8 @@ class Dashboard:
                 self._state["team"] = team or self._state["team"]
                 self._state["detections"] = detections
                 self._state["sensors"] = sensors or {}
+                if health is not None:
+                    self._state["health"] = health
                 self._state["ticks"] += 1
                 if ball is not None:
                     self._state["ball_ticks"] += 1
@@ -187,6 +191,7 @@ class Dashboard:
                 "ball_rate": round(100.0 * ball_ticks / ticks, 1) if ticks else 0.0,
                 "tick_rate": self._state["tick_rate"],
                 "backend": self._state["backend"],
+                "health": dict(self._state["health"]),
                 "transitions": list(reversed(self._transitions)),
                 "error": self._state["error"],
             }

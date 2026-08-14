@@ -21,6 +21,7 @@ from typing import Optional
 from ball_follower import BallFollower, _best_ball, _centre_offset
 from robot_client import MiniAutoRobot
 from vision.camera_stream import CameraStream
+from sensor_monitor import SensorMonitor
 from vision.wall_detector import WallDetector
 
 CENTER_DEADBAND = 0.12          # fraction of frame width considered "centered"
@@ -29,9 +30,10 @@ CLOSE_HEIGHT_THRESHOLD = 0.35   # bbox height fraction considered "ball is close
 PUSH_OBSTACLE_CM = 8            # ultrasonic distance treated as "hit something"
 LOST_BALL_GRACE_TICKS = 3       # consecutive missed detections tolerated before re-searching
 
-SEARCH_SPEED, SEARCH_MS = 150, 260
-PUSH_SPEED, PUSH_MS = 190, 400
-RETREAT_SPEED, RETREAT_MS = 160, 400
+# Aggressive tuning: 255 is the firmware clamp.
+SEARCH_SPEED, SEARCH_MS = 215, 200
+PUSH_SPEED, PUSH_MS = 255, 400
+RETREAT_SPEED, RETREAT_MS = 220, 350
 
 
 class State(Enum):
@@ -74,6 +76,7 @@ class SoccerStrategy:
         self._config = config or Config()
         self._follower = BallFollower()
         self._state = State.SEARCH
+        self._sensors = SensorMonitor()
         self._misses = 0
         # Optional read-only telemetry sink (see dashboard.Dashboard.publish).
         # It never influences decisions; failures in it must not stop the robot.
@@ -126,7 +129,7 @@ class SoccerStrategy:
             f"ball={'seen' if ball else 'none'}"
         )
 
-        sensors = self._robot.read_sensors()
+        sensors = self._sensors.update(self._robot.read_sensors())
 
         if self._observer is not None:
             self._observer(
@@ -137,6 +140,7 @@ class SoccerStrategy:
                 wall=wall,
                 sensors=sensors,
                 ball=ball,
+                health=self._sensors.health(),
             )
 
         if self._state is State.SEARCH:

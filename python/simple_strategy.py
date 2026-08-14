@@ -27,6 +27,7 @@ from typing import Optional
 from ball_follower import _best_ball, _centre_offset
 from robot_client import MiniAutoRobot
 from vision.camera_stream import CameraStream
+from sensor_monitor import SensorMonitor
 from vision.wall_detector import WallDetector
 
 # How far off-centre the ball may be before we bother turning (fraction of
@@ -36,10 +37,11 @@ CENTRE_DEADBAND = 0.15
 # Ball bounding-box height as a fraction of the frame. Bigger box = closer ball.
 CLOSE_ENOUGH = 0.35
 
-TURN_SPEED, TURN_MS = 140, 200
-FORWARD_SPEED, FORWARD_MS = 150, 250
-PUSH_SPEED, PUSH_MS = 190, 350
-BACK_SPEED, BACK_MS = 160, 400
+# Aggressive tuning: 255 is the firmware clamp.
+TURN_SPEED, TURN_MS = 200, 150
+FORWARD_SPEED, FORWARD_MS = 235, 220
+PUSH_SPEED, PUSH_MS = 255, 350
+BACK_SPEED, BACK_MS = 220, 350
 
 
 class State(Enum):
@@ -84,6 +86,7 @@ class SimpleStrategy:
         self._config = config or Config()
         self._observer = observer
         self._state = State.SEARCH
+        self._sensors = SensorMonitor()
         self._last_transition = ""
 
     def close(self) -> None:
@@ -122,12 +125,12 @@ class SimpleStrategy:
         detection = self._detector.detect(jpeg.tobytes(), image_type="jpg")
         ball = _best_ball(detection)
         wall = self._wall.detect(frame)
-        sensors = self._robot.read_sensors()
+        sensors = self._sensors.update(self._robot.read_sensors())
 
         if self._observer is not None:
             self._observer(
                 frame=frame, detection=detection, state=self._state.value,
-                team=self._team(), wall=wall, sensors=sensors, ball=ball,
+                team=self._team(), wall=wall, sensors=sensors, ball=ball, health=self._sensors.health(),
                 transition=self._last_transition,
             )
 

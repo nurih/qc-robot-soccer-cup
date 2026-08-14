@@ -1,12 +1,16 @@
 """
-main.py  -  grab a frame from the ESP32-S3 camera and save it on the robot.
+main.py  -  soccer ball follower for the Hiwonder miniAuto on UNO Q.
 
-Captures a single JPEG frame from the camera's MJPEG stream at startup and
-writes it under captures/ in the app folder, which lives on the board's
-filesystem at ~/ArduinoApps/<app>/captures/ so it can be pulled off with
-`adb pull`.
+Pipeline per the developer journey guide's application loop:
+  acquire frame -> infer -> validate -> decide -> one short guarded action -> reobserve
 
-The board must be joined to the camera's Wi-Fi access point for this to work.
+Motion is gated three ways:
+  * MOTION_ENABLED below (set False to observe detections without moving)
+  * the BOOT button program-enable flow (robot.run_program)
+  * robot.stop() in a finally block
+
+The Edge Impulse .eim model is supplied at runtime, not stored in this repo.
+See app.yaml for the path the object_detection brick loads it from.
 """
 import time
 
@@ -17,6 +21,9 @@ import numpy as np
 import requests
 
 from arduino.app_utils import App
+
+from ball_follower import BallFollower, describe_action
+from detector import make_detector
 from robot_client import MiniAutoRobot
 
 CAMERA_URL = "http://192.168.5.1:81/stream"
@@ -27,16 +34,20 @@ CAPTURES_FOLDER = PROJECT_FOLDER / "captures"
 STREAM_TIMEOUT_SECONDS = 10
 FRAME_READ_TIMEOUT_SECONDS = 15
 
-# The FOMO impulse expects 96x96 RGB with "squash" resize, i.e. the 4:3 frame is
-# distorted to square rather than cropped. Training data must go through the same
-# path so the model sees the same distortion at inference time.
-MODEL_INPUT_SIZE = (96, 96)
+# Set True only with the robot in a safe setup (wheels raised or clear floor space)
+# and someone able to reach the power switch.
+MOTION_ENABLED = False
+
+# Log every detection payload for the first few frames so the label names and
+# bounding-box coordinate space can be confirmed against the trained model.
+DEBUG_FRAMES = 3
 
 
 def grab_frame(url: str = CAMERA_URL, timeout: int = FRAME_READ_TIMEOUT_SECONDS) -> bytes | None:
     """Read the MJPEG stream until one complete JPEG (SOI..EOI) arrives."""
     deadline = time.monotonic() + timeout
     buffer = b""
+    response = None
     try:
         response = requests.get(url, stream=True, timeout=(5, STREAM_TIMEOUT_SECONDS))
         response.raise_for_status()
@@ -52,62 +63,69 @@ def grab_frame(url: str = CAMERA_URL, timeout: int = FRAME_READ_TIMEOUT_SECONDS)
     except requests.exceptions.RequestException as err:
         print(f"[ERROR] camera stream unavailable: {err}")
     finally:
-        try:
+        if response is not None:
             response.close()
-        except NameError:
-            pass
     return None
 
 
-def squash_to_model_input(jpeg: bytes, size: tuple[int, int] = MODEL_INPUT_SIZE):
-    """Decode a JPEG and squash it to the model's input size (aspect ratio ignored)."""
-    frame = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
-    if frame is None:
-        return None
-    # INTER_AREA is the right filter for downscaling; it averages rather than samples.
-    return cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
-
-
-def save_frame(jpeg: bytes) -> tuple[Path, Path | None]:
-    """Save the full-resolution frame plus a squashed model-input copy."""
-    CAPTURES_FOLDER.mkdir(parents=True, exist_ok=True)
-    stamp = int(time.time())
-
-    full_path = CAPTURES_FOLDER / f"frame_{stamp}.jpg"
-    full_path.write_bytes(jpeg)
-
-    resized = squash_to_model_input(jpeg)
-    if resized is None:
-        print("[WARN] could not decode frame for resize")
-        return full_path, None
-
-    width, height = MODEL_INPUT_SIZE
-    small_path = CAPTURES_FOLDER / f"frame_{stamp}_{width}x{height}.jpg"
-    cv2.imwrite(str(small_path), resized)
-    return full_path, small_path
+def frame_size(jpeg: bytes) -> tuple[int, int]:
+    """Return (width, height) of a JPEG, or (0, 0) if it cannot be decoded."""
+    image = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        return 0, 0
+    return image.shape[1], image.shape[0]
 
 
 robot = MiniAutoRobot()
 print(f"health   : {robot.health()}")
 print(f"sensors  : {robot.read_sensors()}")
 print(f"capture folder: {CAPTURES_FOLDER}")
+print(f"[INFO] motion {'ENABLED' if MOTION_ENABLED else 'DISABLED (observe only)'}")
 
-print(f"[INFO] connecting to camera: {CAMERA_URL}")
-frame = grab_frame()
+detector = make_detector()
+follower = BallFollower()
 
-if frame is None:
-    print("[ERROR] no frame captured - is the board joined to the camera Wi-Fi AP?")
-else:
-    full_path, small_path = save_frame(frame)
-    print(f"[CAPTURE] saved {len(frame)} bytes -> {full_path}")
-    if small_path is not None:
-        width, height = MODEL_INPUT_SIZE
-        print(f"[CAPTURE] {width}x{height} model input -> {small_path}")
+_frames_seen = 0
+
+
+def observe_and_act() -> None:
+    """One pass of the application loop."""
+    global _frames_seen
+
+    jpeg = grab_frame()
+    if jpeg is None:
+        print("[SAFE] no frame -> stop")
+        robot.stop()
+        return
+
+    width, height = frame_size(jpeg)
+    result = detector.detect(jpeg, image_type="jpg")
+
+    _frames_seen += 1
+    if _frames_seen <= DEBUG_FRAMES:
+        print(f"[DEBUG] frame {width}x{height} raw detection payload: {result}")
+
+    action = follower.decide(result, width, robot.read_sensors())
+    print(describe_action(action))
+
+    if action is None:
+        robot.stop()
+        return
+
+    if not MOTION_ENABLED:
+        return
+
+    command, speed, ms = action
+    robot.drive(command, speed, ms)
 
 
 def loop() -> None:
-    """Nothing to do after the capture; idle so the app stays alive."""
-    time.sleep(5)
+    observe_and_act()
+    time.sleep(0.05)
 
 
-App.run(user_loop=loop)
+print("[INFO] waiting for BOOT button to start...")
+try:
+    App.run(user_loop=lambda: robot.run_program(loop))
+finally:
+    robot.stop()

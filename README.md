@@ -506,6 +506,11 @@ Adding a per-frame diagnostic line showing raw red/blue coverage percentages is 
 - Print coverage percentages for a few seconds at startup to calibrate thresholds for your specific lighting.
 ## Model Import
 
+> Once you have an exported `.eim`, see **[docs/BALL_FOLLOWING.md](docs/BALL_FOLLOWING.md)**
+> for running it on the robot: where to put the model, the two inference backends
+> (`DETECTOR_BACKEND=brick|eim`), the live detection debugger, and the
+> ball-following policy.
+
 ### 1. Find Captured Images
 
 Create an Edge Impulse project or clone [our project with prelabelled capture data](https://studio.edgeimpulse.com/public/1085406/live).

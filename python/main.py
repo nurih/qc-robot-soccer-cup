@@ -1,64 +1,83 @@
+"""
+main.py  -  grab a frame from the ESP32-S3 camera and save it on the robot.
+
+Captures a single JPEG frame from the camera's MJPEG stream at startup and
+writes it under captures/ in the app folder, which lives on the board's
+filesystem at ~/ArduinoApps/<app>/captures/ so it can be pulled off with
+`adb pull`.
+
+The board must be joined to the camera's Wi-Fi access point for this to work.
+"""
+import io
 import time
+
+from pathlib import Path
+
+import requests
 
 from arduino.app_utils import App
 from robot_client import MiniAutoRobot
 
-robot = MiniAutoRobot()
+CAMERA_URL = "http://192.168.5.1:81/stream"
 
+PROJECT_FOLDER = Path(__file__).resolve().parent.parent
+CAPTURES_FOLDER = PROJECT_FOLDER / "captures"
+
+STREAM_TIMEOUT_SECONDS = 10
+FRAME_READ_TIMEOUT_SECONDS = 15
+
+
+def grab_frame(url: str = CAMERA_URL, timeout: int = FRAME_READ_TIMEOUT_SECONDS) -> bytes | None:
+    """Read the MJPEG stream until one complete JPEG (SOI..EOI) arrives."""
+    deadline = time.monotonic() + timeout
+    buffer = b""
+    try:
+        response = requests.get(url, stream=True, timeout=(5, STREAM_TIMEOUT_SECONDS))
+        response.raise_for_status()
+        for chunk in response.iter_content(chunk_size=4096):
+            if time.monotonic() > deadline:
+                print("[WARN] timed out waiting for a complete frame")
+                break
+            buffer += chunk
+            start = buffer.find(b"\xff\xd8")
+            end = buffer.find(b"\xff\xd9", start + 2)
+            if start != -1 and end != -1:
+                return buffer[start:end + 2]
+    except requests.exceptions.RequestException as err:
+        print(f"[ERROR] camera stream unavailable: {err}")
+    finally:
+        try:
+            response.close()
+        except NameError:
+            pass
+    return None
+
+
+def save_frame(jpeg: bytes) -> Path:
+    CAPTURES_FOLDER.mkdir(parents=True, exist_ok=True)
+    path = CAPTURES_FOLDER / f"frame_{int(time.time())}.jpg"
+    path.write_bytes(jpeg)
+    return path
+
+
+robot = MiniAutoRobot()
 print(f"health   : {robot.health()}")
 print(f"sensors  : {robot.read_sensors()}")
+print(f"capture folder: {CAPTURES_FOLDER}")
 
-# Track the toggle so we only print when it actually changes.
-# Hold the CAM boot button for 5 seconds to switch teams.
-_last_toggle = robot.hold_toggle()
-print(f"[TEAM] active team: {'BLUE' if _last_toggle else 'RED'}  (hold CAM button 5 s to switch)")
+print(f"[INFO] connecting to camera: {CAMERA_URL}")
+frame = grab_frame()
 
-
-def drive(direction: str, speed: int = 150, ms: int = 500) -> None:
-    """Drive and wait for the move to finish before continuing."""
-    print(f"  {direction} speed={speed} ms={ms}")
-    robot.drive(direction, speed, ms)
+if frame is None:
+    print("[ERROR] no frame captured - is the board joined to the camera Wi-Fi AP?")
+else:
+    saved = save_frame(frame)
+    print(f"[CAPTURE] saved {len(frame)} bytes -> {saved}")
 
 
 def loop() -> None:
-    global _last_toggle
-    current = robot.hold_toggle()
-    if current != _last_toggle:
-        _last_toggle = current
-        team = "BLUE" if current else "RED"
-        print(f"[TEAM] switched to: {team}")
-
-    # --- Move ---
-    drive("forward",      speed=150, ms=500)
-    drive("backward",     speed=150, ms=500)
-    drive("left",         speed=150, ms=500)   # strafe left
-    drive("right",        speed=150, ms=500)   # strafe right
-    drive("rotate_left",  speed=255, ms=3250)  # spin in place, 255 firmware cap on speed
-    time.sleep(0.5)
-    drive("rotate_right", speed=255, ms=3250)
-
-    robot.stop()
-    time.sleep(0.5)
-
-    # --- Sensors ---
-    sensors = robot.read_sensors()
-    print(f"ultrasonic : {sensors.get('ultrasonic_cm')} cm")
-    print(f"battery    : {sensors.get('battery_mv')} mV")
-    print(f"line       : {sensors.get('line_digital')}")
-
-    # --- Extras ---
-    robot.led(True)
-    robot.servo(90)
-    robot.servo(150)
-    robot.servo(30)
-    robot.servo(90)
-    robot.led(False)
-
-    robot.stop()
+    """Nothing to do after the capture; idle so the app stays alive."""
+    time.sleep(5)
 
 
-print("[INFO] waiting for BOOT button to start...")
-try:
-    App.run(user_loop=lambda: robot.run_program(loop))
-finally:
-    robot.stop()
+App.run(user_loop=loop)

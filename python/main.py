@@ -2,16 +2,15 @@ import os
 import time
 
 from arduino.app_utils import App
+from detector import make_detector
 from robot_client import MiniAutoRobot, ProgramStopped
 from strategy import Config, SoccerStrategy
-from vision.ball_detector import BallDetector
 from vision.camera_stream import CameraStream
 from vision.wall_detector import WallDetector
 
 robot = MiniAutoRobot()
 
 CAMERA_URL = os.environ.get("CAMERA_STREAM_URL", "http://192.168.5.1:81/stream")
-MODEL_PATH = os.environ.get("ROBOCUP_MODEL_PATH", "")
 BALL_LABEL = os.environ.get("ROBOCUP_BALL_LABEL", "soccerball")
 BALL_CONFIDENCE = float(os.environ.get("ROBOCUP_BALL_CONFIDENCE", "0.5"))
 WALL_MIN_COVERAGE_PCT = float(os.environ.get("ROBOCUP_WALL_MIN_COVERAGE_PCT", "2.0"))
@@ -63,30 +62,16 @@ def demo_sequence() -> None:
 
 
 def _build_strategy() -> SoccerStrategy:
-    if not MODEL_PATH:
-        raise SystemExit(
-            "ROBOCUP_MODEL_PATH is not set. Point it at your externally supplied "
-            ".eim object-detection model (see README.md Model Import); the "
-            "model file itself is never committed to this repo."
-        )
-
     camera = CameraStream(CAMERA_URL)
-    ball_detector = BallDetector(MODEL_PATH, min_confidence=BALL_CONFIDENCE)
+    detector = make_detector(confidence=BALL_CONFIDENCE)
     wall_detector = WallDetector(min_coverage_pct=WALL_MIN_COVERAGE_PCT)
 
     camera.open()
-    ball_detector.open()
-    print(f"[STRATEGY] model labels: {ball_detector.labels}")
-    if BALL_LABEL not in ball_detector.labels:
-        print(
-            f"[STRATEGY] WARNING: configured ball label '{BALL_LABEL}' is not "
-            f"in the model's labels -- set ROBOCUP_BALL_LABEL to match exactly"
-        )
 
     return SoccerStrategy(
         robot,
         camera,
-        ball_detector,
+        detector,
         wall_detector,
         config=Config(stale_frame_s=STALE_FRAME_S, ball_label=BALL_LABEL),
     )

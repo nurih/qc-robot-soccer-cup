@@ -17,6 +17,9 @@ BALL_CONFIDENCE = float(os.environ.get("ROBOCUP_BALL_CONFIDENCE", "0.5"))
 WALL_MIN_COVERAGE_PCT = float(os.environ.get("ROBOCUP_WALL_MIN_COVERAGE_PCT", "2.0"))
 STALE_FRAME_S = int(os.environ.get("ROBOCUP_STALE_FRAME_MS", "500")) / 1000.0
 MODE = os.environ.get("ROBOCUP_MODE", "match")  # "match" or "demo"
+# "full" = strategy.SoccerStrategy; "simple" = simple_strategy.SimpleStrategy,
+# a minimal readable version that logs every state transition and why.
+STRATEGY = os.environ.get("ROBOCUP_STRATEGY", "full")
 DASHBOARD = os.environ.get("ROBOCUP_DASHBOARD", "1") not in {"0", "false", "False"}
 
 # Read-only telemetry sink; attaching it cannot change robot behaviour.
@@ -66,12 +69,24 @@ def demo_sequence() -> None:
     robot.stop()
 
 
-def _build_strategy() -> SoccerStrategy:
+def _build_strategy():
     camera = CameraStream(CAMERA_URL)
     detector = make_detector(confidence=BALL_CONFIDENCE)
     wall_detector = WallDetector(min_coverage_pct=WALL_MIN_COVERAGE_PCT)
 
     camera.open()
+
+    if STRATEGY == "simple":
+        from simple_strategy import Config as SimpleConfig, SimpleStrategy
+
+        return SimpleStrategy(
+            robot,
+            camera,
+            detector,
+            wall_detector,
+            config=SimpleConfig(stale_frame_s=STALE_FRAME_S, ball_label=BALL_LABEL),
+            observer=dashboard.publish if dashboard is not None else None,
+        )
 
     return SoccerStrategy(
         robot,
@@ -109,7 +124,7 @@ def loop() -> None:
         run_match()
 
 
-print(f"[INFO] mode: {MODE}")
+print(f"[INFO] mode: {MODE}  strategy: {STRATEGY}")
 if dashboard is not None:
     print(f"[INFO] dashboard: {dashboard.url}")
 print("[INFO] waiting for BOOT button to start...")

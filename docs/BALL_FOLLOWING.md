@@ -150,3 +150,58 @@ wheels raised and confirm it turns the correct way before putting it on a floor.
 - **The model over-reports `robot`** on out-of-distribution scenes (desks,
   laptops, people) at high confidence. Detection is much better with the robot at
   floor level looking at the pitch, matching how the training data was captured.
+
+## Understanding the state machine
+
+`python/simple_strategy.py` is a minimal version of the same four states, written
+to be read rather than tuned. One rule per state, and every state change goes
+through `_go()`, which logs why it happened:
+
+```
+[SIMPLE] SEARCH -> APPROACH : BALL SEEN
+[SIMPLE] APPROACH -> PUSH : BALL IS CLOSE
+[SIMPLE] PUSH -> RETREAT : OWN WALL AHEAD
+[SIMPLE] RETREAT -> SEARCH : BACKED OFF
+```
+
+Run it on the robot with:
+
+```bash
+adb shell 'docker exec -e ROBOCUP_STRATEGY=simple miniautodriver-main-1 ...'
+```
+
+or set `ROBOCUP_STRATEGY=simple` for the app. `full` (the default) selects
+`strategy.SoccerStrategy`.
+
+### Watch it without a robot
+
+`python/state_machine_demo.py` feeds the machine a scripted sequence of fake
+camera, detector, and wall inputs and prints every tick. It stubs the App Lab
+Bridge, so it runs on a laptop as well as on the board:
+
+```bash
+python3 python/state_machine_demo.py
+```
+
+```
+ #  situation                  wall     state      command
+ 1  nothing in view            UNKNOWN  search     rotate_left 140/200ms
+ 3  ball appears, far left     UNKNOWN  search -> approach -
+ 5  roughly centred            UNKNOWN  approach   forward 150/250ms
+ 7  centred and much closer    UNKNOWN  approach -> push -
+ 8  pushing, opponent wall     BLUE     push       forward 190/350ms
+ 9  pushing, our own wall      RED      push -> retreat -
+10  after backing off          RED      retreat -> search backward 160/400ms
+```
+
+Two things worth noticing in that trace:
+
+- **A transition tick issues no motion.** The state changes, and the *next* tick
+  acts on it. That costs one tick (~50 ms) per transition, and keeps each
+  decision based on a fresh observation.
+- **Losing the ball resets to SEARCH from any state**, checked before the
+  per-state rules. That is the single most common transition in practice, since
+  detection is intermittent.
+
+The dashboard shows the same transitions live under "State transitions", newest
+first, so you can watch the machine move while the robot runs.

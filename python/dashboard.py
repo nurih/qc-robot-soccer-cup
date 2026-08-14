@@ -26,6 +26,9 @@ ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 PREVIEW_INTERVAL_SECONDS = 0.2
 PREVIEW_JPEG_QUALITY = 80
 
+# How many recent state transitions to keep for the dashboard.
+TRANSITION_HISTORY = 12
+
 BALL_COLOUR = (80, 220, 90)
 OTHER_COLOUR = (170, 170, 170)
 
@@ -80,6 +83,8 @@ class Dashboard:
             "error": "",
         }
         self._last_tick_at = 0.0
+        self._last_transition = ""
+        self._transitions: list[str] = []
 
         self._ui = WebUI(assets_dir_path=str(ASSETS_DIR))
         self._ui.expose_api("GET", "/state", self.api_state)
@@ -100,6 +105,7 @@ class Dashboard:
         wall=None,
         sensors: dict | None = None,
         ball: dict | None = None,
+        transition: str = "",
     ) -> None:
         """Record one tick of telemetry. Cheap, and never raises into the caller."""
         try:
@@ -112,6 +118,13 @@ class Dashboard:
                     if elapsed > 0:
                         self._state["tick_rate"] = round(1.0 / elapsed, 1)
                 self._last_tick_at = now
+
+                # Keep a short history so the state machine's path is visible,
+                # not just where it happens to be right now.
+                if transition and transition != self._last_transition:
+                    self._last_transition = transition
+                    self._transitions.append(transition)
+                    del self._transitions[:-TRANSITION_HISTORY]
 
                 self._state["state"] = state or self._state["state"]
                 self._state["team"] = team or self._state["team"]
@@ -168,6 +181,7 @@ class Dashboard:
                 "ball_rate": round(100.0 * ball_ticks / ticks, 1) if ticks else 0.0,
                 "tick_rate": self._state["tick_rate"],
                 "backend": self._state["backend"],
+                "transitions": list(reversed(self._transitions)),
                 "error": self._state["error"],
             }
 

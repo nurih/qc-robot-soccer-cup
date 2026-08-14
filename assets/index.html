@@ -48,6 +48,11 @@
   .bar > i { display: block; height: 100%; background: var(--accent); }
   .err { color: var(--bad); font-size: 12px; margin-top: 8px; word-break: break-word; }
   .muted { color: var(--muted); }
+  .trans { list-style: none; margin: 0; padding: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .trans li { padding: 4px 0; border-bottom: 1px solid var(--line); }
+  .trans li:last-child { border-bottom: none; }
+  .trans li:first-child { color: var(--accent); }
+  .trans .why { color: var(--muted); }
 </style>
 </head>
 <body>
@@ -81,6 +86,11 @@
           <thead><tr><th>Label</th><th class="num">Conf</th><th class="num">Centre x</th></tr></thead>
           <tbody id="dets"><tr><td colspan="3" class="muted">none</td></tr></tbody>
         </table>
+      </div>
+
+      <div class="panel" style="margin-bottom:16px">
+        <h2>State transitions</h2>
+        <ol id="trans" class="trans"><li class="muted">none yet</li></ol>
       </div>
 
       <div class="panel">
@@ -130,6 +140,15 @@ async function tickState() {
     $('line').textContent = sensors.line_ok === undefined ? '–'
       : (sensors.line_ok ? JSON.stringify(sensors.line_digital || []) : 'unavailable');
     $('batt').textContent = sensors.battery_mv ? (sensors.battery_mv / 1000).toFixed(2) + ' V' : '–';
+
+    const tr = $('trans');
+    const list = s.transitions || [];
+    tr.innerHTML = list.length
+      ? list.map(t => {
+          const [path, why] = t.split(' : ');
+          return `<li>${path.replace('->', '&rarr;')} <span class="why">${why || ''}</span></li>`;
+        }).join('')
+      : '<li class="muted">none yet</li>';
 
     const body = $('dets');
     if (!s.detections.length) {

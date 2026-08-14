@@ -82,6 +82,12 @@ def _build_strategy():
     detector = make_detector(confidence=BALL_CONFIDENCE)
     wall_detector = WallDetector(min_coverage_pct=WALL_MIN_COVERAGE_PCT)
 
+    # Hand the camera over: the dashboard's idle reader must let go before the
+    # strategy opens the stream, or the open fails and the run dies immediately.
+    if dashboard is not None:
+        dashboard.pause_idle_feed()
+        time.sleep(0.4)
+
     camera.open()
 
     if STRATEGY == "simple":
@@ -116,6 +122,8 @@ def run_match() -> None:
             time.sleep(0.05)
     finally:
         strategy.close()
+        if dashboard is not None:
+            dashboard.resume_idle_feed()
 
 
 def loop() -> None:

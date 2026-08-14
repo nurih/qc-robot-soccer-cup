@@ -105,6 +105,29 @@ allowed with a dead distance sensor, since turning cannot close on an obstacle.
 Tunables live at the top of `ball_follower.py`: `MIN_CONFIDENCE`,
 `TURN_DEADZONE`, speeds, pulse durations, `ARRIVED_DISTANCE_MM`.
 
+## Opening the dashboard
+
+Two ways in. Over USB is usually easier, because it leaves your laptop on its
+normal Wi-Fi:
+
+```bash
+scripts/dashboard.sh          # forwards the board's port 7000 over adb
+# -> http://localhost:7000
+```
+
+The forward is per-connection, so re-run it after unplugging or swapping boards.
+With two boards attached, give the second a different local port:
+
+```bash
+scripts/dashboard.sh <adb-serial> 7001
+```
+
+Alternatively join the camera's access point (`miniAuto_CAM_<nn>`) and browse to
+the board's address on that network, printed at startup as
+`[INFO] dashboard: http://192.168.5.2:7000`. That path also gives you the raw
+camera stream at `http://192.168.5.1:81/`, but it takes your laptop off the
+internet.
+
 ## Debugging
 
 ```bash

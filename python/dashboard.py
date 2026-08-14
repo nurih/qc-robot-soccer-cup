@@ -114,6 +114,7 @@ class Dashboard:
         # the stream itself, but only while the strategy is idle, so the two
         # never hold the camera at the same time.
         self._camera_url = camera_url
+        self._idle_paused = False
         if camera_url:
             threading.Thread(target=self._idle_preview_loop, daemon=True).start()
 
@@ -187,8 +188,24 @@ class Dashboard:
 
     # -- idle preview -----------------------------------------------------
 
+    def pause_idle_feed(self) -> None:
+        """Release the camera so the strategy can open it.
+
+        The idle reader must let go *before* the strategy opens the stream: the
+        camera only serves a limited number of clients, and waiting for ticks
+        that cannot start yet would deadlock.
+        """
+        with self._lock:
+            self._idle_paused = True
+
+    def resume_idle_feed(self) -> None:
+        with self._lock:
+            self._idle_paused = False
+
     def _strategy_is_live(self) -> bool:
         with self._lock:
+            if self._idle_paused:
+                return True
             last = self._last_tick_at
         return bool(last) and (time.monotonic() - last) < IDLE_AFTER_SECONDS
 
@@ -205,6 +222,8 @@ class Dashboard:
             try:
                 response = requests.get(self._camera_url, stream=True, timeout=(5, 10))
                 response.raise_for_status()
+                # Take a single frame and hang up, so the camera is free almost
+                # all the time rather than held by this thread.
                 buffer = b""
                 for chunk in response.iter_content(4096):
                     if self._strategy_is_live():
@@ -214,12 +233,12 @@ class Dashboard:
                     end = buffer.find(b"\xff\xd9", start + 2)
                     if start == -1 or end == -1:
                         continue
-                    jpeg, buffer = buffer[start:end + 2], buffer[end + 2:]
                     with self._lock:
-                        self._preview = jpeg
+                        self._preview = buffer[start:end + 2]
                         self._last_preview_at = time.monotonic()
                         self._state["camera_idle_feed"] = True
-                    time.sleep(PREVIEW_INTERVAL_SECONDS)
+                    break
+                time.sleep(IDLE_POLL_SECONDS)
             except Exception as err:
                 with self._lock:
                     self._state["error"] = f"camera: {str(err)[:160]}"

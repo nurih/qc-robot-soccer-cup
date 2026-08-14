@@ -43,6 +43,12 @@ SEARCH_SWEEP_SECONDS = 0.8
 SEARCH_SWEEPS_BEFORE_TURNAROUND = 4
 SEARCH_TURNAROUND_SECONDS = 1.2
 
+# Sweeping in place cannot find a ball that is somewhere else on the field.
+# After this long with no sighting, drive somewhere new and search from there.
+BALL_LOST_ROAM_AFTER_S = 30.0
+ROAM_SECONDS = 5.0
+ROAM_SPEED, ROAM_MS = 180, 300
+
 # Stuck escape. There are no encoders or IMU, so "stuck" is inferred: we keep
 # commanding forward motion while the front distance stays pinned very close.
 # Without this the robot grinds into a wall indefinitely - notably while pushing
@@ -75,6 +81,7 @@ RETREAT_SPEED, RETREAT_MS = 220, 300
 
 class State(Enum):
     SEARCH = "search"
+    ROAM = "roam"
     APPROACH = "approach"
     PUSH = "push"
     RETREAT = "retreat"
@@ -127,6 +134,8 @@ class SoccerStrategy:
         self._misses = 0
         self._last_transition = ""
         # Sweep bookkeeping: direction, when the current leg ends, legs so far.
+        self._last_ball_at = time.monotonic()
+        self._roam_until = 0.0
         self._sweep_dir = -1          # -1 = left, +1 = right
         self._sweep_until = 0.0
         self._sweeps = 0
@@ -181,10 +190,13 @@ class SoccerStrategy:
 
         if ball is None:
             self._misses += 1
-            if self._misses >= LOST_BALL_GRACE_TICKS:
+            # ROAM is a deliberate relocation; not seeing the ball is expected
+            # there and must not bounce us straight back to SEARCH.
+            if self._misses >= LOST_BALL_GRACE_TICKS and self._state is not State.ROAM:
                 self._go(State.SEARCH, "ball lost")
         else:
             self._misses = 0
+            self._last_ball_at = time.monotonic()
 
         goal = _best_goal(detection)
         opponent_robot = _best_robot(detection)
@@ -226,7 +238,9 @@ class SoccerStrategy:
         if self._avoid_opponent(opponent_robot, frame_w, distance_cm):
             return
 
-        if self._state is State.SEARCH:
+        if self._state is State.ROAM:
+            self._do_roam(ball)
+        elif self._state is State.SEARCH:
             self._do_search(ball)
         elif self._state is State.APPROACH:
             self._do_approach(detection, ball, frame_w, frame_h, sensors)
@@ -308,6 +322,21 @@ class SoccerStrategy:
             self._drive("forward", AVOID_FORWARD_SPEED, AVOID_FORWARD_MS)
         return True
 
+    def _do_roam(self, ball: Optional[dict]) -> None:
+        """Drive somewhere new, then search again from there."""
+        if ball is not None:
+            self._go(State.APPROACH, "ball seen while roaming")
+            return
+
+        if time.monotonic() >= self._roam_until:
+            # Reset the clock, or we would roam again on the very next tick.
+            self._last_ball_at = time.monotonic()
+            self._sweep_until = 0.0
+            self._go(State.SEARCH, "roam finished, searching here")
+            return
+
+        self._drive("forward", ROAM_SPEED, ROAM_MS)
+
     def _do_search(self, ball: Optional[dict]) -> None:
         """Sweep back and forth rather than spinning, turning around periodically.
 
@@ -324,6 +353,11 @@ class SoccerStrategy:
             return
 
         now = time.monotonic()
+        if now - self._last_ball_at >= BALL_LOST_ROAM_AFTER_S:
+            self._roam_until = now + ROAM_SECONDS
+            self._go(State.ROAM, f"no ball for {now - self._last_ball_at:.0f}s")
+            return
+
         if now >= self._sweep_until:
             if self._turning_around:
                 # Finished turning around; resume sweeping from here.

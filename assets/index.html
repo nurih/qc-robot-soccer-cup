@@ -109,6 +109,7 @@
 
         <div class="machine">
           <div class="row">
+            <div class="node" data-state="roam">ROAM</div><span class="arr">&rarr;</span>
             <div class="node" data-state="search">SEARCH</div><span class="arr">&rarr;</span>
             <div class="node" data-state="approach">APPROACH</div><span class="arr">&rarr;</span>
             <div class="node" data-state="push">PUSH</div>
@@ -119,7 +120,8 @@
             <span class="arr">&larr;</span>
             <span class="why">own wall</span>
           </div>
-          <div class="why lost">ball lost &rarr; back to SEARCH from any state</div>
+          <div class="why lost">ball lost &rarr; back to SEARCH from any state<br>
+            no ball for 30 s &rarr; ROAM somewhere new for 5 s</div>
         </div>
 
         <div class="kv"><span>Program</span><span id="prog" class="pill off">idle</span></div>

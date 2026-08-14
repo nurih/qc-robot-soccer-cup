@@ -8,11 +8,12 @@ filesystem at ~/ArduinoApps/<app>/captures/ so it can be pulled off with
 
 The board must be joined to the camera's Wi-Fi access point for this to work.
 """
-import io
 import time
 
 from pathlib import Path
 
+import cv2
+import numpy as np
 import requests
 
 from arduino.app_utils import App
@@ -25,6 +26,11 @@ CAPTURES_FOLDER = PROJECT_FOLDER / "captures"
 
 STREAM_TIMEOUT_SECONDS = 10
 FRAME_READ_TIMEOUT_SECONDS = 15
+
+# The FOMO impulse expects 96x96 RGB with "squash" resize, i.e. the 4:3 frame is
+# distorted to square rather than cropped. Training data must go through the same
+# path so the model sees the same distortion at inference time.
+MODEL_INPUT_SIZE = (96, 96)
 
 
 def grab_frame(url: str = CAMERA_URL, timeout: int = FRAME_READ_TIMEOUT_SECONDS) -> bytes | None:
@@ -53,11 +59,32 @@ def grab_frame(url: str = CAMERA_URL, timeout: int = FRAME_READ_TIMEOUT_SECONDS)
     return None
 
 
-def save_frame(jpeg: bytes) -> Path:
+def squash_to_model_input(jpeg: bytes, size: tuple[int, int] = MODEL_INPUT_SIZE):
+    """Decode a JPEG and squash it to the model's input size (aspect ratio ignored)."""
+    frame = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if frame is None:
+        return None
+    # INTER_AREA is the right filter for downscaling; it averages rather than samples.
+    return cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
+
+
+def save_frame(jpeg: bytes) -> tuple[Path, Path | None]:
+    """Save the full-resolution frame plus a squashed model-input copy."""
     CAPTURES_FOLDER.mkdir(parents=True, exist_ok=True)
-    path = CAPTURES_FOLDER / f"frame_{int(time.time())}.jpg"
-    path.write_bytes(jpeg)
-    return path
+    stamp = int(time.time())
+
+    full_path = CAPTURES_FOLDER / f"frame_{stamp}.jpg"
+    full_path.write_bytes(jpeg)
+
+    resized = squash_to_model_input(jpeg)
+    if resized is None:
+        print("[WARN] could not decode frame for resize")
+        return full_path, None
+
+    width, height = MODEL_INPUT_SIZE
+    small_path = CAPTURES_FOLDER / f"frame_{stamp}_{width}x{height}.jpg"
+    cv2.imwrite(str(small_path), resized)
+    return full_path, small_path
 
 
 robot = MiniAutoRobot()
@@ -71,8 +98,11 @@ frame = grab_frame()
 if frame is None:
     print("[ERROR] no frame captured - is the board joined to the camera Wi-Fi AP?")
 else:
-    saved = save_frame(frame)
-    print(f"[CAPTURE] saved {len(frame)} bytes -> {saved}")
+    full_path, small_path = save_frame(frame)
+    print(f"[CAPTURE] saved {len(frame)} bytes -> {full_path}")
+    if small_path is not None:
+        width, height = MODEL_INPUT_SIZE
+        print(f"[CAPTURE] {width}x{height} model input -> {small_path}")
 
 
 def loop() -> None:

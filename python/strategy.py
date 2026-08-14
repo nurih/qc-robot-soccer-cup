@@ -12,6 +12,8 @@ the DETECTOR_BACKEND environment variable. BallFollower from ball_follower.py
 owns the turn/advance decision logic for APPROACH, keeping it unit-testable
 independently of the full strategy.
 """
+import time
+
 import cv2
 
 from dataclasses import dataclass
@@ -32,6 +34,14 @@ REALIGN_DEADBAND = 0.18         # wider deadband tolerated while already pushing
 CLOSE_HEIGHT_THRESHOLD = 0.35   # bbox height fraction considered "ball is close"
 PUSH_OBSTACLE_CM = 8            # ultrasonic distance treated as "hit something"
 LOST_BALL_GRACE_TICKS = 3       # consecutive missed detections tolerated before re-searching
+
+# Search sweeps left and right instead of spinning on the spot, so the camera
+# lingers over each patch of field long enough for a detection to land. Times are
+# wall-clock because rotation speed depends on battery and surface; tune
+# SEARCH_SWEEP_SECONDS until one sweep covers roughly 180 degrees.
+SEARCH_SWEEP_SECONDS = 1.2
+SEARCH_SWEEPS_BEFORE_TURNAROUND = 4
+SEARCH_TURNAROUND_SECONDS = 1.2
 
 # Opponent avoidance: cornering or tipping an opponent is a yellow card, so this
 # check outranks whatever the robot was doing.
@@ -105,6 +115,11 @@ class SoccerStrategy:
         self._perception = perception
         self._misses = 0
         self._last_transition = ""
+        # Sweep bookkeeping: direction, when the current leg ends, legs so far.
+        self._sweep_dir = -1          # -1 = left, +1 = right
+        self._sweep_until = 0.0
+        self._sweeps = 0
+        self._turning_around = False
         # Optional read-only telemetry sink (see dashboard.Dashboard.publish).
         # It never influences decisions; failures in it must not stop the robot.
         self._observer = observer
@@ -233,10 +248,45 @@ class SoccerStrategy:
         return True
 
     def _do_search(self, ball: Optional[dict]) -> None:
+        """Sweep back and forth rather than spinning, turning around periodically.
+
+        A continuous spin keeps every part of the field in view only briefly,
+        which is bad news for a detector that needs a few frames to catch on.
+        Sweeping holds each direction for a while; after a few legs the robot
+        turns around so it stops re-scanning the same arc.
+        """
         if ball is not None:
             self._go(State.APPROACH, "ball seen")
+            self._sweep_until = 0.0     # restart the pattern on the next search
+            self._sweeps = 0
+            self._turning_around = False
             return
-        self._robot.drive_async("rotate_left", SEARCH_SPEED, SEARCH_MS)
+
+        now = time.monotonic()
+        if now >= self._sweep_until:
+            if self._turning_around:
+                # Finished turning around; resume sweeping from here.
+                self._turning_around = False
+                self._sweep_until = now + SEARCH_SWEEP_SECONDS
+                print("[STRATEGY] search: turnaround complete, sweeping again")
+            else:
+                self._sweeps += 1
+                if self._sweeps >= SEARCH_SWEEPS_BEFORE_TURNAROUND:
+                    self._sweeps = 0
+                    self._turning_around = True
+                    self._sweep_until = now + SEARCH_TURNAROUND_SECONDS
+                    print("[STRATEGY] search: 4 sweeps done -> turning around")
+                else:
+                    self._sweep_dir = -self._sweep_dir
+                    self._sweep_until = now + SEARCH_SWEEP_SECONDS
+                    side = "left" if self._sweep_dir < 0 else "right"
+                    print(f"[STRATEGY] search: sweep {self._sweeps} -> {side}")
+
+        # A turnaround always continues in one direction; a sweep follows the
+        # current leg. Either way it is one short command, refreshed each tick.
+        direction = self._sweep_dir if not self._turning_around else 1
+        command = "rotate_left" if direction < 0 else "rotate_right"
+        self._robot.drive_async(command, SEARCH_SPEED, SEARCH_MS)
 
     def _do_approach(
         self,

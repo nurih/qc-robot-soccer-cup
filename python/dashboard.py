@@ -65,7 +65,7 @@ def annotate(frame, detections: list):
 class Dashboard:
     """Collects strategy telemetry and serves it over HTTP."""
 
-    def __init__(self, port: int = 7000, backend: str = "") -> None:
+    def __init__(self, port: int = 7000, backend: str = "", on_stop=None) -> None:
         self._lock = threading.Lock()
         self._preview = b""
         self._last_preview_at = 0.0
@@ -86,9 +86,15 @@ class Dashboard:
         self._last_transition = ""
         self._transitions: list[str] = []
 
+        # The one action the dashboard can take. Stopping is always safe, and the
+        # firmware's stop also clears program_enabled, so this doubles as a
+        # software kill switch alongside the physical BOOT button.
+        self._on_stop = on_stop
+
         self._ui = WebUI(assets_dir_path=str(ASSETS_DIR))
         self._ui.expose_api("GET", "/state", self.api_state)
         self._ui.expose_api("GET", "/preview", self.api_preview)
+        self._ui.expose_api("POST", "/stop", self.api_stop)
 
     @property
     def url(self) -> str:
@@ -184,6 +190,17 @@ class Dashboard:
                 "transitions": list(reversed(self._transitions)),
                 "error": self._state["error"],
             }
+
+    def api_stop(self) -> dict:
+        """Stop the robot. Also clears program_enabled, so the routine ends."""
+        if self._on_stop is None:
+            return {"ok": False, "error": "stop not wired up"}
+        try:
+            self._on_stop()
+            return {"ok": True}
+        except Exception as err:
+            self.note_error(f"stop failed: {err}")
+            return {"ok": False, "error": str(err)[:180]}
 
     def api_preview(self) -> dict:
         with self._lock:

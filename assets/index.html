@@ -53,11 +53,36 @@
   .trans li:last-child { border-bottom: none; }
   .trans li:first-child { color: var(--accent); }
   .trans .why { color: var(--muted); }
+  .machine { margin: 2px 0 12px; }
+  .machine .row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .machine .row.back { margin-top: 6px; padding-left: 8px; }
+  .node {
+    border: 1px solid var(--line); border-radius: 6px; padding: 4px 9px;
+    font-size: 11px; font-weight: 600; letter-spacing: .04em; color: var(--muted);
+    background: rgba(255,255,255,.02); transition: all .15s;
+  }
+  .node.active {
+    color: #08210f; background: var(--ok); border-color: var(--ok);
+    box-shadow: 0 0 0 3px rgba(62,207,122,.18);
+  }
+  .arr { color: var(--muted); font-size: 12px; }
+  .why { color: var(--muted); font-size: 11px; }
+  .why.lost { margin-top: 8px; }
+  .why.note { margin-top: 8px; line-height: 1.4; }
+  .stopbtn {
+    width: 100%; margin-top: 12px; padding: 9px 0; cursor: pointer;
+    background: rgba(227,93,106,.14); color: var(--bad);
+    border: 1px solid rgba(227,93,106,.4); border-radius: 8px;
+    font: 600 13px/1 inherit; letter-spacing: .06em;
+  }
+  .stopbtn:hover { background: rgba(227,93,106,.24); }
+  .stopbtn:active { transform: translateY(1px); }
+  .stopbtn:disabled { opacity: .45; cursor: not-allowed; }
 </style>
 </head>
 <body>
   <h1>miniAuto &mdash; ball following</h1>
-  <div class="sub">Live view of the soccer strategy: camera, detections, wall side, and state machine. Read-only &mdash; it never drives the robot.</div>
+  <div class="sub">Live view of the soccer strategy: camera, detections, wall side, and state machine. The only control is STOP; it never starts or steers the robot.</div>
 
   <div class="grid">
     <div class="panel">
@@ -73,11 +98,30 @@
     <div>
       <div class="panel" style="margin-bottom:16px">
         <h2>Strategy</h2>
-        <div id="action" class="action stop">&ndash;</div>
+
+        <div class="machine">
+          <div class="row">
+            <div class="node" data-state="search">SEARCH</div><span class="arr">&rarr;</span>
+            <div class="node" data-state="approach">APPROACH</div><span class="arr">&rarr;</span>
+            <div class="node" data-state="push">PUSH</div>
+          </div>
+          <div class="row back">
+            <span class="arr">&larr;</span>
+            <div class="node" data-state="retreat">RETREAT</div>
+            <span class="arr">&larr;</span>
+            <span class="why">own wall</span>
+          </div>
+          <div class="why lost">ball lost &rarr; back to SEARCH from any state</div>
+        </div>
+
         <div class="kv"><span>Program</span><span id="prog" class="pill off">idle</span></div>
         <div class="kv"><span>Team</span><span id="team">&ndash;</span></div>
         <div class="kv"><span>Wall ahead</span><span id="wall">&ndash;</span></div>
         <div class="kv"><span>Wall coverage</span><span id="wallpct" class="muted">&ndash;</span></div>
+
+        <button id="stopBtn" class="stopbtn">STOP</button>
+        <div class="why note">Start and team switch are firmware-side: short-press the
+          camera BOOT button to start, hold it 5 s to swap team.</div>
       </div>
 
       <div class="panel" style="margin-bottom:16px">
@@ -115,8 +159,8 @@ async function tickState() {
     const s = await (await fetch('/state')).json();
 
     const act = s.state || 'idle';
-    $('action').textContent = act.toUpperCase();
-    $('action').className = 'action ' + (act === 'idle' ? 'stop' : 'go');
+    document.querySelectorAll('.node').forEach(n =>
+      n.classList.toggle('active', n.dataset.state === act));
 
     pill($('camPill'), s.ticks > 0, 'live', 'waiting', false);
     $('ballRate').textContent = s.ball_rate + '%';
@@ -171,6 +215,21 @@ async function tickPreview() {
     if (p.image) $('feed').src = 'data:image/jpeg;base64,' + p.image;
   } catch (e) { /* keep the last frame on a hiccup */ }
 }
+
+const stopBtn = $('stopBtn');
+stopBtn.addEventListener('click', async () => {
+  stopBtn.disabled = true;
+  const original = stopBtn.textContent;
+  try {
+    const r = await (await fetch('/stop', { method: 'POST' })).json();
+    stopBtn.textContent = r.ok ? 'STOPPED' : 'FAILED';
+    if (!r.ok) $('err').textContent = r.error || 'stop failed';
+  } catch (e) {
+    stopBtn.textContent = 'FAILED';
+    $('err').textContent = 'stop: ' + e;
+  }
+  setTimeout(() => { stopBtn.textContent = original; stopBtn.disabled = false; }, 1200);
+});
 
 setInterval(tickState, 400);
 setInterval(tickPreview, 300);

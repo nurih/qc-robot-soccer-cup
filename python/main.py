@@ -23,7 +23,11 @@ STRATEGY = os.environ.get("ROBOCUP_STRATEGY", "full")
 DASHBOARD = os.environ.get("ROBOCUP_DASHBOARD", "1") not in {"0", "false", "False"}
 
 # Read-only telemetry sink; attaching it cannot change robot behaviour.
-dashboard = Dashboard(backend=os.environ.get("DETECTOR_BACKEND", "brick")) if DASHBOARD else None
+dashboard = (
+    Dashboard(backend=os.environ.get("DETECTOR_BACKEND", "brick"), on_stop=robot.stop)
+    if DASHBOARD
+    else None
+)
 
 print(f"health   : {robot.health()}")
 print(f"sensors  : {robot.read_sensors()}")

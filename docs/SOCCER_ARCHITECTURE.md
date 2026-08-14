@@ -29,36 +29,37 @@ The strategy uses this to decide which wall color to drive toward.
 
 ## System Diagram
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    VISION  (python/vision/)                  │
-│                                                             │
-│  CameraStream ──► BallDetector (.eim) ──► Detection bbox    │
-│                └► WallDetector  (HSV) ──► WallReading       │
-└───────────────────────────┬─────────────────────────────────┘
-                            │ frame, Detection, WallReading
-┌───────────────────────────▼─────────────────────────────────┐
-│                  STRATEGY  (python/strategy.py)              │
-│                                                             │
-│  SoccerStrategy.tick()  called every ~50 ms                 │
-│                                                             │
-│   ┌─────────┐  ball detected  ┌──────────┐                  │
-│   │  SEARCH │───────────────► │ APPROACH │                  │
-│   └─────────┘                 └────┬─────┘                  │
-│        ▲   ◄── ball lost ─────────┘│ ball close (bbox tall) │
-│        │                      ┌────▼─────┐                  │
-│        │   ◄── ball lost ─────│   PUSH   │                  │
-│        │                      └────┬─────┘                  │
-│        │   ◄── own wall ahead ─────┘│ own wall = retreat    │
-│        │                      ┌────▼─────┐                  │
-│        └───────── done ───────│ RETREAT  │                  │
-│                               └──────────┘                  │
-└───────────────────────────┬─────────────────────────────────┘
-                            │ robot.drive() / robot.stop()
-┌───────────────────────────▼─────────────────────────────────┐
-│                  HARDWARE  (python/robot_client.py)          │
-│                  FIRMWARE  (sketch/sketch.ino)               │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    Camera["ESP32-S3 camera\nMJPEG stream"]
+
+    subgraph Vision["VISION (python/vision/)"]
+        Stream["CameraStream"]
+        Ball["BallDetector (.eim)"]
+        Wall["WallDetector (HSV)"]
+        Detection["Detection bbox"]
+        Reading["WallReading"]
+
+        Stream --> Ball --> Detection
+        Stream --> Wall --> Reading
+    end
+
+    subgraph Strategy["STRATEGY (python/strategy.py)"]
+        Tick["SoccerStrategy.tick()\n~20 Hz"]
+        Machine["SEARCH / APPROACH / PUSH / RETREAT"]
+        Tick --> Machine
+    end
+
+    subgraph Hardware["HARDWARE"]
+        Client["MiniAutoRobot\n(python/robot_client.py)"]
+        Firmware["UNO Q firmware\n(sketch/sketch.ino)"]
+        Client --> Firmware
+    end
+
+    Camera --> Stream
+    Detection --> Tick
+    Reading --> Tick
+    Machine -->|"robot.drive() / robot.stop()"| Client
 ```
 
 ---
@@ -67,6 +68,32 @@ The strategy uses this to decide which wall color to drive toward.
 
 **Default / resting state is SEARCH.**
 The robot scans by rotating until it sees the ball.
+
+```mermaid
+stateDiagram-v2
+    [*] --> SEARCH
+
+    SEARCH --> APPROACH: ball detected
+    APPROACH --> PUSH: ball close or follower arrived
+    APPROACH --> SEARCH: ball missing for grace ticks
+
+    PUSH --> APPROACH: ball lost or needs realignment
+    PUSH --> RETREAT: own wall ahead or close obstacle
+    RETREAT --> SEARCH: backward pulse complete
+
+    state APPROACH {
+        [*] --> CenterBall
+        CenterBall --> Advance: ball centered
+        Advance --> CenterBall: ball drifts off-center
+    }
+
+    state "Safety stop" as STOP
+    SEARCH --> STOP: stale or missing frame
+    APPROACH --> STOP: stale or missing frame
+    PUSH --> STOP: stale or missing frame
+    RETREAT --> STOP: stale or missing frame
+    STOP --> SEARCH: valid frame on next tick
+```
 
 | State | Entry | Behavior | Exits to |
 |---|---|---|---|

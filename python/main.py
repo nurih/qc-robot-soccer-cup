@@ -2,6 +2,7 @@ import os
 import time
 
 from arduino.app_utils import App
+from dashboard import Dashboard
 from detector import make_detector
 from robot_client import MiniAutoRobot, ProgramStopped
 from strategy import Config, SoccerStrategy
@@ -16,6 +17,10 @@ BALL_CONFIDENCE = float(os.environ.get("ROBOCUP_BALL_CONFIDENCE", "0.5"))
 WALL_MIN_COVERAGE_PCT = float(os.environ.get("ROBOCUP_WALL_MIN_COVERAGE_PCT", "2.0"))
 STALE_FRAME_S = int(os.environ.get("ROBOCUP_STALE_FRAME_MS", "500")) / 1000.0
 MODE = os.environ.get("ROBOCUP_MODE", "match")  # "match" or "demo"
+DASHBOARD = os.environ.get("ROBOCUP_DASHBOARD", "1") not in {"0", "false", "False"}
+
+# Read-only telemetry sink; attaching it cannot change robot behaviour.
+dashboard = Dashboard(backend=os.environ.get("DETECTOR_BACKEND", "brick")) if DASHBOARD else None
 
 print(f"health   : {robot.health()}")
 print(f"sensors  : {robot.read_sensors()}")
@@ -74,6 +79,7 @@ def _build_strategy() -> SoccerStrategy:
         detector,
         wall_detector,
         config=Config(stale_frame_s=STALE_FRAME_S, ball_label=BALL_LABEL),
+        observer=dashboard.publish if dashboard is not None else None,
     )
 
 
@@ -104,6 +110,8 @@ def loop() -> None:
 
 
 print(f"[INFO] mode: {MODE}")
+if dashboard is not None:
+    print(f"[INFO] dashboard: {dashboard.url}")
 print("[INFO] waiting for BOOT button to start...")
 try:
     App.run(user_loop=lambda: robot.run_program(loop))

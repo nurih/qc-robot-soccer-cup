@@ -65,6 +65,7 @@ class SoccerStrategy:
         detector,
         wall_detector: WallDetector,
         config: Optional[Config] = None,
+        observer=None,
     ) -> None:
         self._robot = robot
         self._camera = camera
@@ -74,6 +75,9 @@ class SoccerStrategy:
         self._follower = BallFollower()
         self._state = State.SEARCH
         self._misses = 0
+        # Optional read-only telemetry sink (see dashboard.Dashboard.publish).
+        # It never influences decisions; failures in it must not stop the robot.
+        self._observer = observer
 
     def close(self) -> None:
         self._camera.close()
@@ -123,6 +127,17 @@ class SoccerStrategy:
         )
 
         sensors = self._robot.read_sensors()
+
+        if self._observer is not None:
+            self._observer(
+                frame=frame,
+                detection=detection,
+                state=self._state.value,
+                team=team,
+                wall=wall,
+                sensors=sensors,
+                ball=ball,
+            )
 
         if self._state is State.SEARCH:
             self._do_search(ball)

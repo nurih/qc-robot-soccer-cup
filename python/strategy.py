@@ -39,9 +39,20 @@ LOST_BALL_GRACE_TICKS = 3       # consecutive missed detections tolerated before
 # lingers over each patch of field long enough for a detection to land. Times are
 # wall-clock because rotation speed depends on battery and surface; tune
 # SEARCH_SWEEP_SECONDS until one sweep covers roughly 180 degrees.
-SEARCH_SWEEP_SECONDS = 1.2
+SEARCH_SWEEP_SECONDS = 0.8
 SEARCH_SWEEPS_BEFORE_TURNAROUND = 4
 SEARCH_TURNAROUND_SECONDS = 1.2
+
+# Stuck escape. There are no encoders or IMU, so "stuck" is inferred: we keep
+# commanding forward motion while the front distance stays pinned very close.
+# Without this the robot grinds into a wall indefinitely - notably while pushing
+# toward the opponent wall, where the obstacle check below is deliberately
+# skipped so a legitimate goal push is not aborted.
+STUCK_DISTANCE_CM = 10
+STUCK_TICKS = 8
+ESCAPE_BACK_SPEED, ESCAPE_BACK_MS = 200, 350
+ESCAPE_TURN_SPEED, ESCAPE_TURN_MS = 200, 300
+ESCAPE_SECONDS = 1.2
 
 # Opponent avoidance: cornering or tipping an opponent is a yellow card, so this
 # check outranks whatever the robot was doing.
@@ -57,7 +68,7 @@ GOAL_ALIGN_DEADBAND = 0.20
 # With drive_async the duration is no longer a motion quantum - it is a dead-man
 # timeout. It must outlast one loop iteration (~150 ms) so motion stays smooth
 # between commands, while still stopping the robot quickly if the loop dies.
-SEARCH_SPEED, SEARCH_MS = 150, 300
+SEARCH_SPEED, SEARCH_MS = 120, 300
 PUSH_SPEED, PUSH_MS = 255, 300
 RETREAT_SPEED, RETREAT_MS = 220, 300
 
@@ -120,6 +131,9 @@ class SoccerStrategy:
         self._sweep_until = 0.0
         self._sweeps = 0
         self._turning_around = False
+        self._stuck_ticks = 0
+        self._escape_until = 0.0
+        self._last_command_was_forward = False
         # Optional read-only telemetry sink (see dashboard.Dashboard.publish).
         # It never influences decisions; failures in it must not stop the robot.
         self._observer = observer
@@ -205,6 +219,10 @@ class SoccerStrategy:
         # Avoidance outranks every state, including PUSH: being shoved into a
         # wall mid-push is exactly the yellow-card scenario. It is a per-tick
         # override, not a state, so we resume wherever we were once clear.
+        # Being wedged outranks everything: nothing else works from there.
+        if self._escape_if_stuck(distance_cm):
+            return
+
         if self._avoid_opponent(opponent_robot, frame_w, distance_cm):
             return
 
@@ -216,6 +234,49 @@ class SoccerStrategy:
             self._do_push(ball, goal, frame_w, wall, opponent, sensors)
         else:
             self._do_retreat()
+
+    def _drive(self, command: str, speed: int, ms: int) -> None:
+        """Single place every motion goes through, so stuck detection can see it."""
+        self._last_command_was_forward = command == "forward"
+        self._robot.drive_async(command, speed, ms)
+
+    def _escape_if_stuck(self, distance_cm) -> bool:
+        """Back off and turn when we appear wedged. Returns True if it took the tick.
+
+        Detection is indirect: no encoders means we cannot tell "commanded to
+        move" from "actually moved", so we infer it from commanding forward while
+        the front distance stays pinned close. A dead ultrasonic (-1) therefore
+        makes us blind to being stuck - the counter simply never rises.
+        """
+        now = time.monotonic()
+        if now < self._escape_until:
+            # Mid-escape: reverse first, then turn to face somewhere new.
+            remaining = self._escape_until - now
+            if remaining > ESCAPE_SECONDS / 2:
+                self._drive("backward", ESCAPE_BACK_SPEED, ESCAPE_BACK_MS)
+            else:
+                self._drive("rotate_left", ESCAPE_TURN_SPEED, ESCAPE_TURN_MS)
+            return True
+
+        try:
+            distance_cm = int(distance_cm)
+        except (TypeError, ValueError):
+            distance_cm = -1
+
+        pinned = 0 < distance_cm <= STUCK_DISTANCE_CM
+        if pinned and self._last_command_was_forward:
+            self._stuck_ticks += 1
+        else:
+            self._stuck_ticks = 0
+
+        if self._stuck_ticks >= STUCK_TICKS:
+            print(f"[STRATEGY] stuck at {distance_cm}cm for {self._stuck_ticks} ticks -> escaping")
+            self._stuck_ticks = 0
+            self._escape_until = now + ESCAPE_SECONDS
+            self._go(State.SEARCH, "escaped after being stuck")
+            self._drive("backward", ESCAPE_BACK_SPEED, ESCAPE_BACK_MS)
+            return True
+        return False
 
     def _avoid_opponent(self, opponent_robot, frame_w: int, distance_cm) -> bool:
         """Steer clear of another robot. Returns True if it took the tick.
@@ -240,11 +301,11 @@ class SoccerStrategy:
             # Dead ahead: turn away from the side it occupies.
             command = "rotate_right" if offset < 0 else "rotate_left"
             print(f"[STRATEGY] opponent at {distance_cm}cm dead ahead -> {command}")
-            self._robot.drive_async(command, AVOID_TURN_SPEED, AVOID_TURN_MS)
+            self._drive(command, AVOID_TURN_SPEED, AVOID_TURN_MS)
         else:
             # Already off to one side: drive past it.
             print(f"[STRATEGY] slipping past opponent at {distance_cm}cm")
-            self._robot.drive_async("forward", AVOID_FORWARD_SPEED, AVOID_FORWARD_MS)
+            self._drive("forward", AVOID_FORWARD_SPEED, AVOID_FORWARD_MS)
         return True
 
     def _do_search(self, ball: Optional[dict]) -> None:
@@ -286,7 +347,7 @@ class SoccerStrategy:
         # current leg. Either way it is one short command, refreshed each tick.
         direction = self._sweep_dir if not self._turning_around else 1
         command = "rotate_left" if direction < 0 else "rotate_right"
-        self._robot.drive_async(command, SEARCH_SPEED, SEARCH_MS)
+        self._drive(command, SEARCH_SPEED, SEARCH_MS)
 
     def _do_approach(
         self,
@@ -313,7 +374,7 @@ class SoccerStrategy:
             self._go(State.PUSH, "ball is close")
             return
 
-        self._robot.drive_async(command, speed, ms)
+        self._drive(command, speed, ms)
 
     def _do_push(
         self,
@@ -341,20 +402,20 @@ class SoccerStrategy:
             misalign = goal_offset - offset
             if abs(misalign) <= GOAL_ALIGN_DEADBAND:
                 print(f"[STRATEGY] ball+goal aligned ({misalign:+.2f}) -> KICK")
-                self._robot.drive_async("forward", KICK_SPEED, KICK_MS)
+                self._drive("forward", KICK_SPEED, KICK_MS)
             else:
                 # Line the goal up behind the ball before committing.
                 command = "rotate_right" if misalign > 0 else "rotate_left"
                 print(f"[STRATEGY] goal off by {misalign:+.2f} -> {command}")
-                self._robot.drive_async(command, SEARCH_SPEED, 150)
+                self._drive(command, SEARCH_SPEED, 150)
         elif wall.side == opponent:
             # Fallback: no goal in frame, so trust wall colour as before. Goal
             # detection is unreliable, so this path stays the safety net.
-            self._robot.drive_async("forward", PUSH_SPEED, PUSH_MS)
+            self._drive("forward", PUSH_SPEED, PUSH_MS)
         elif wall.side == "UNKNOWN":
             # Ambiguous wall colour -- nudge forward cautiously and re-check
             # next tick instead of committing to a full push.
-            self._robot.drive_async("forward", PUSH_SPEED, PUSH_MS // 2)
+            self._drive("forward", PUSH_SPEED, PUSH_MS // 2)
         else:
             # Own-side wall ahead -- pushing here risks an own goal.
             self._go(State.RETREAT, "own wall ahead")
@@ -364,5 +425,5 @@ class SoccerStrategy:
             self._go(State.RETREAT, "unexpected obstacle while pushing")
 
     def _do_retreat(self) -> None:
-        self._robot.drive_async("backward", RETREAT_SPEED, RETREAT_MS)
+        self._drive("backward", RETREAT_SPEED, RETREAT_MS)
         self._go(State.SEARCH, "backed off")

@@ -36,6 +36,12 @@ BATTERY_CRITICAL_MV = 10200
 # Rolling window for the health percentages.
 WINDOW = 100
 
+# The sensor reports failures as -1, but a wedged I2C read can also surface as
+# 0xFFFF (65535) or other nonsense. The module's real range is a few metres, so
+# anything beyond this is a fault, not a distance -- and must not be read as
+# "the path is clear".
+MAX_PLAUSIBLE_MM = 4500
+
 
 class SensorMonitor:
     """Repairs brief sensor dropouts and reports rolling health."""
@@ -80,7 +86,7 @@ class SensorMonitor:
         except (TypeError, ValueError):
             raw_mm = -1
 
-        good = raw_mm > 0
+        good = 0 < raw_mm <= MAX_PLAUSIBLE_MM
         self._distance_results.append(good)
         del self._distance_results[:-WINDOW]
 
@@ -107,7 +113,10 @@ class SensorMonitor:
                 sensors["ultrasonic_trusted"] = True
                 self._repairs += 1
             else:
-                # Fail closed: leave -1 so the policy refuses to drive forward.
+                # Fail closed: normalise to -1 so the policy refuses to drive
+                # forward. Leaving 65535 here would read as wide-open space.
+                sensors["ultrasonic_mm"] = -1
+                sensors["ultrasonic_cm"] = -1
                 sensors["ultrasonic_stale"] = True
                 sensors["ultrasonic_trusted"] = False
 
